@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useProfiles, useCloakBrowser } from '../hooks/useProfiles';
 import { useWebSocket } from '../hooks/useWebSocket';
-import type { Profile } from '../types';
+import type { Profile, FlowProject } from '../types';
 import '../styles/App.css';
 
 // Notification component
@@ -566,6 +566,84 @@ function AboutTab({ cloakStatus }: { cloakStatus: { ready: boolean; available: b
     );
 }
 
+function formatDate(dateStr: string | undefined) {
+    if (!dateStr) return '—';
+    const date = new Date(dateStr);
+    return date.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+}
+
+function formatRelativeTime(dateStr: string | undefined) {
+    if (!dateStr) return '';
+    const date = new Date(dateStr);
+    const now = new Date();
+    const diff = now.getTime() - date.getTime();
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+    if (minutes < 1) return 'Vừa xong';
+    if (minutes < 60) return `${minutes} phút trước`;
+    if (hours < 24) return `${hours} giờ trước`;
+    return `${days} ngày trước`;
+}
+
+// FlowProject Card Component
+interface FlowProjectCardProps {
+    project: FlowProject;
+    profile?: Profile;
+}
+
+function FlowProjectCard({ project, profile }: FlowProjectCardProps) {
+    const profileName = profile?.name || '—';
+    const profileShortId = profile?.id ? `#${profile.id.substring(0, 8)}` : '—';
+
+    return (
+        <div className="profile-card">
+            <div className="profile-header">
+                <div className="profile-title">
+                    <div className="profile-avatar">🌊</div>
+                    <div>
+                        <div className="profile-name">{project.name || 'Project'}</div>
+                        <div className="profile-id">{project.projectId ? `Project ID: ${project.projectId}` : `#${project.id.substring(0, 8)}`}</div>
+                    </div>
+                </div>
+                <div className="profile-badges">
+                    <div className="profile-badge badge-active">
+                        <span>●</span>
+                        Đã tạo
+                    </div>
+                </div>
+            </div>
+
+            <div className="profile-description">
+                {project.description || 'Không có mô tả'}
+            </div>
+
+            <div className="profile-meta">
+                <div className="meta-item">
+                    <span className="meta-label">Profile</span>
+                    <span className="meta-value">
+                        {profileName} ({profileShortId})
+                    </span>
+                </div>
+                <div className="meta-item">
+                    <span className="meta-label">Tool</span>
+                    <span className="meta-value">{project.toolName || 'PINHOLE'}</span>
+                </div>
+                <div className="meta-item">
+                    <span className="meta-label">Ngày tạo</span>
+                    <span className="meta-value">{formatDate(project.createdAt)}</span>
+                </div>
+                <div className="meta-item">
+                    <span className="meta-label">Trạng thái</span>
+                    <span className="meta-value">
+                        <span className="profile-badge badge-active">● Đã tạo</span>
+                    </span>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 // Flow Projects Tab
 function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profile[]; onCreateProjectsBatch: (data: { profileIds: string[]; name: string; description?: string; toolName?: string }) => Promise<any> }) {
     const [showModal, setShowModal] = useState(false);
@@ -574,16 +652,39 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
     const [creating, setCreating] = useState(false);
     const [results, setResults] = useState<any[] | null>(null);
 
+    // Derive flow projects from profile metadata
+    const allProjects: FlowProject[] = profiles.flatMap((profile) => {
+        const items: FlowProject[] = [];
+        const rawProjects = Array.isArray((profile.metadata || {}).flowProjects)
+            ? ((profile.metadata || {}).flowProjects as any[])
+            : [];
+        rawProjects.forEach((raw, idx) => {
+            items.push({
+                id: raw.projectId || `${profile.id}-${idx}`,
+                profileId: profile.id,
+                name: raw.name,
+                description: raw.description,
+                toolName: raw.toolName,
+                createdAt: raw.createdAt,
+                projectId: raw.projectId,
+            });
+        });
+        return items;
+    });
+
+    const profileMap = new Map(profiles.map((profile) => [profile.id, profile]));
+
     const toggleProfile = (id: string) => {
-        setSelectedIds(prev => {
+        setSelectedIds((prev) => {
             const next = new Set(prev);
-            if (next.has(id)) next.delete(id); else next.add(id);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
             return next;
         });
     };
 
     const toggleAll = () => {
-        setSelectedIds(selectedIds.size === profiles.length ? new Set() : new Set(profiles.map(p => p.id)));
+        setSelectedIds(selectedIds.size === profiles.length ? new Set() : new Set(profiles.map((p) => p.id)));
     };
 
     const handleSubmit = async () => {
@@ -596,11 +697,23 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                 name: projectName.trim(),
                 toolName: 'PINHOLE',
             });
-            setResults(response?.data ?? []);
+            const data = Array.isArray(response?.data) ? response.data : [];
+            const normalized = data.map((item: any) => ({
+                status: item.status || (item.projectId ? 'success' : 'error'),
+                profileId: item.profileId,
+                projectId: item.projectId,
+                error: item.error,
+            }));
+            setResults(normalized);
+            if (normalized.some((item: any) => item.status === 'success')) {
+                window.dispatchEvent(new CustomEvent('refresh-profiles'));
+            }
         } catch (err) {
             setResults([
                 {
                     status: 'error',
+                    profileId: undefined,
+                    projectId: undefined,
                     error: err instanceof Error ? err.message : 'Lỗi không xác định',
                 },
             ]);
@@ -623,6 +736,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                     <h2><span>🌊</span> Flow Projects</h2>
                 </div>
                 <div className="header-actions">
+                    <button className="btn btn-ghost" onClick={() => window.dispatchEvent(new CustomEvent('refresh-profiles'))}>🔄 Làm Mới</button>
                     <button className="btn btn-primary" onClick={() => setShowModal(true)}>
                         + Tạo Project Mới
                     </button>
@@ -635,19 +749,20 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                         <h3>Chưa có profile nào</h3>
                         <p>Hãy tạo profile trước, rồi quay lại đây để tạo project trên Flow.</p>
                     </div>
+                ) : allProjects.length === 0 ? (
+                    <div className="empty-state">
+                        <div className="empty-icon">🌊</div>
+                        <h3>Chưa có Flow Project nào</h3>
+                        <p>Nhấn "Tạo Project Mới" để bắt đầu tạo project trên Google Flow.</p>
+                        <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Tạo Project Đầu Tiên</button>
+                    </div>
                 ) : (
                     <div className="profiles-grid">
-                        {profiles.map((profile: Profile) => (
-                            <ProfileCard
-                                key={profile.id}
-                                profile={profile}
-                                onOpen={async () => {}}
-                                onClose={async () => {}}
-                                onSave={async () => {}}
-                                onEdit={() => {}}
-                                onDelete={() => {}}
-                                onRefreshTier={async () => {}}
-                                onSetProxy={() => {}}
+                        {allProjects.map((project) => (
+                            <FlowProjectCard
+                                key={`${project.profileId}-${project.id}`}
+                                project={project}
+                                profile={profileMap.get(project.profileId)}
                             />
                         ))}
                     </div>
@@ -724,29 +839,32 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                                 <div className="form-group">
                                     <label className="form-label">Kết quả</label>
                                     <div style={{ maxHeight: '220px', overflowY: 'auto', borderRadius: '8px', border: '1px solid var(--border)' }}>
-                                        {results.map((item: any, idx: number) => (
-                                            <div
-                                                key={idx}
-                                                style={{
-                                                    padding: '10px 12px',
-                                                    borderBottom: idx !== results.length - 1 ? '1px solid var(--border)' : 'none',
-                                                    background: item.status === 'success' ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)',
-                                                }}
-                                            >
-                                                <div style={{ fontWeight: 600 }}>
-                                                    {item.status === 'success' ? '✓' : '✗'} {item.profileId ? `#${item.profileId.substring(0, 8)}` : '—'}
+                                        {results.map((item: any, idx: number) => {
+                                            const success = item.status === 'success';
+                                            return (
+                                                <div
+                                                    key={idx}
+                                                    style={{
+                                                        padding: '10px 12px',
+                                                        borderBottom: idx !== results.length - 1 ? '1px solid var(--border)' : 'none',
+                                                        background: success ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+                                                    }}
+                                                >
+                                                    <div style={{ fontWeight: 600 }}>
+                                                        {success ? '✓' : '✗'} {item.profileId ? `#${item.profileId.substring(0, 8)}` : '—'}
+                                                    </div>
+                                                    {success ? (
+                                                        <div style={{ fontSize: '0.85rem', marginTop: '4px' }}>
+                                                            Project ID: <code>{item.projectId || '(đã tạo)'}</code>
+                                                        </div>
+                                                    ) : (
+                                                        <div style={{ fontSize: '0.85rem', color: 'var(--error)', marginTop: '4px' }}>
+                                                            {item.error || 'Lỗi không xác định'}
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                {item.status === 'success' ? (
-                                                    <div style={{ fontSize: '0.85rem', marginTop: '4px' }}>
-                                                        Project ID: <code>{item.projectId || '(đã tạo)'}</code>
-                                                    </div>
-                                                ) : (
-                                                    <div style={{ fontSize: '0.85rem', color: 'var(--error)', marginTop: '4px' }}>
-                                                        {item.error || 'Lỗi không xác định'}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 </div>
                             )}
