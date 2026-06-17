@@ -587,6 +587,7 @@ interface EntityReference {
     profileId: string;
     projectId: string;
     aspectRatio: string;
+    upscaleResolution: string;
     metadata: string;
     createdAt: string;
 }
@@ -625,9 +626,21 @@ const DEFAULT_MATERIALS: MaterialStyle[] = [
 ];
 
 function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLightbox }: EntitiesTabProps) {
-    const { generating, lastResult, error, generateEntity, reset: resetResult } = useEntities();
+    const { generating, lastResult, error, generateEntity, upscaleEntity, reset: resetResult } = useEntities();
+    const [generatingEntity, setGeneratingEntity] = useState<{
+        name: string;
+        entityType: string;
+        materialId: string;
+        materialStyle: any;
+        profileId: string;
+        projectId?: string;
+        modelKey: string;
+        aspectRatio: string;
+        upscaleResolution: string;
+    } | null>(null);
     const [entities, setEntities] = useState<EntityReference[]>([]);
     const [loading, setLoading] = useState(true);
+    const [upscallingId, setUpscallingId] = useState<string | null>(null);
     // Cascading selectors
     const [selectedProjectName, setSelectedProjectName] = useState<string>('');
     const [selectedProfileIdx, setSelectedProfileIdx] = useState<number>(0);
@@ -637,6 +650,7 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
     const [materialId, setMaterialId] = useState('3d_pixar');
     const [modelKey, setModelKey] = useState('NANO_BANANA_PRO');
     const [aspectRatio, setAspectRatio] = useState('IMAGE_ASPECT_RATIO_PORTRAIT');
+    const [upscaleResolution, setUpscaleResolution] = useState('UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL');
     const [filter, setFilter] = useState<string>('all');
     // Material style manager
     const [materials, setMaterials] = useState<MaterialStyle[]>(DEFAULT_MATERIALS);
@@ -697,6 +711,19 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
 
         const selectedMaterial = materials.find(m => m.id === materialId);
 
+        // Track generation params for potential regenerate
+        setGeneratingEntity({
+            name: name.trim(),
+            entityType,
+            materialId,
+            materialStyle: selectedMaterial,
+            profileId: selectedProfile.id,
+            projectId: selectedProjectObj?.projectId,
+            modelKey,
+            aspectRatio,
+            upscaleResolution,
+        });
+
         // Auto-open profile if not already running and wait for it to be ready
         if (selectedProfile.status !== 'running') {
             if (onOpenProfile) {
@@ -728,6 +755,7 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                 materialStyle: selectedMaterial,
                 modelKey,
                 aspectRatio,
+                upscaleResolution,
             });
             if (result) {
                 setEntities(prev => [result, ...prev]);
@@ -736,6 +764,8 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
             }
         } catch (e) {
             // error is surfaced via `error` prop from useEntities
+        } finally {
+            setGeneratingEntity(null);
         }
     };
 
@@ -749,6 +779,82 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
             }
         } catch (e) {
             alert('Failed to delete entity');
+        }
+    };
+
+    const handleRegenerate = async (entity: EntityReference) => {
+        if (generating) return;
+
+        // Parse materialStyle from metadata
+        let materialStyle: any = null;
+        try {
+            if (entity.metadata) {
+                materialStyle = JSON.parse(entity.metadata);
+            }
+        } catch (e) {
+            // Use default material style
+        }
+
+        // Get material from materials list or create one from metadata
+        const materialId = entity.materialId;
+        let selectedMaterial = materials.find(m => m.id === materialId);
+        if (!selectedMaterial && materialStyle) {
+            selectedMaterial = materialStyle;
+        }
+        if (!selectedMaterial) {
+            selectedMaterial = materials.find(m => m.id === '3d_pixar');
+        }
+
+        // Set generating entity state
+        setGeneratingEntity({
+            name: entity.name,
+            entityType: entity.entityType,
+            materialId: entity.materialId,
+            materialStyle: selectedMaterial,
+            profileId: entity.profileId,
+            projectId: entity.projectId,
+            modelKey: 'NANO_BANANA_PRO',
+            aspectRatio: entity.aspectRatio || 'IMAGE_ASPECT_RATIO_PORTRAIT',
+            upscaleResolution: entity.upscaleResolution || 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
+        });
+
+        try {
+            const result = await generateEntity({
+                name: entity.name,
+                description: entity.description,
+                entityType: entity.entityType,
+                materialId: entity.materialId,
+                profileId: entity.profileId,
+                projectId: entity.projectId,
+                materialStyle: selectedMaterial,
+                modelKey: 'NANO_BANANA_PRO',
+                aspectRatio: entity.aspectRatio || 'IMAGE_ASPECT_RATIO_PORTRAIT',
+                upscaleResolution: entity.upscaleResolution || 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
+            });
+            if (result) {
+                setEntities(prev => [result, ...prev]);
+            }
+        } catch (e) {
+            // error is surfaced via `error` prop from useEntities
+        } finally {
+            setGeneratingEntity(null);
+        }
+    };
+
+    const handleUpscale = async (id: string, resolution: string) => {
+        const resolutionLabel = resolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '4K' : '2K';
+        if (!confirm(`Upscale to ${resolutionLabel}? This will replace the current image.`)) return;
+
+        setUpscallingId(id);
+        try {
+            const updated = await upscaleEntity(id, resolution);
+            if (updated) {
+                setEntities(prev => prev.map(e => e.id === id ? updated : e));
+            }
+        } catch (e: any) {
+            alert(`Upscale failed: ${e.message}`);
+        } finally {
+            setUpscallingId(null);
         }
     };
 
@@ -939,6 +1045,60 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                                         </select>
                                     </div>
 
+                                    <div className="form-group">
+                                        <label className="form-label">Upscale Resolution</label>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                                            <div
+                                                onClick={() => setUpscaleResolution('UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL')}
+                                                style={{
+                                                    padding: '8px 6px',
+                                                    borderRadius: '8px',
+                                                    background: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' ? '#6366f1' : 'var(--bg-secondary)',
+                                                    color: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' ? 'white' : 'var(--text)',
+                                                    cursor: 'pointer',
+                                                    textAlign: 'center',
+                                                    transition: 'all 0.2s',
+                                                    border: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' ? '2px solid #6366f1' : '2px solid transparent',
+                                                }}
+                                            >
+                                                <div style={{ fontSize: '1rem' }}>📷</div>
+                                                <div style={{ fontSize: '0.7rem' }}>Original</div>
+                                            </div>
+                                            <div
+                                                onClick={() => setUpscaleResolution('UPSAMPLE_IMAGE_RESOLUTION_2K')}
+                                                style={{
+                                                    padding: '8px 6px',
+                                                    borderRadius: '8px',
+                                                    background: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_2K' ? '#22c55e' : 'var(--bg-secondary)',
+                                                    color: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_2K' ? 'white' : 'var(--text)',
+                                                    cursor: 'pointer',
+                                                    textAlign: 'center',
+                                                    transition: 'all 0.2s',
+                                                    border: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_2K' ? '2px solid #22c55e' : '2px solid transparent',
+                                                }}
+                                            >
+                                                <div style={{ fontSize: '1rem' }}>🖼️</div>
+                                                <div style={{ fontSize: '0.7rem' }}>2K</div>
+                                            </div>
+                                            <div
+                                                onClick={() => setUpscaleResolution('UPSAMPLE_IMAGE_RESOLUTION_4K')}
+                                                style={{
+                                                    padding: '8px 6px',
+                                                    borderRadius: '8px',
+                                                    background: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '#f59e0b' : 'var(--bg-secondary)',
+                                                    color: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? 'white' : 'var(--text)',
+                                                    cursor: 'pointer',
+                                                    textAlign: 'center',
+                                                    transition: 'all 0.2s',
+                                                    border: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '2px solid #f59e0b' : '2px solid transparent',
+                                                }}
+                                            >
+                                                <div style={{ fontSize: '1rem' }}>🏔️</div>
+                                                <div style={{ fontSize: '0.7rem' }}>4K</div>
+                                            </div>
+                                        </div>
+                                    </div>
+
                                     {selectedProfile && (
                                         <div style={{ padding: '10px 12px', background: selectedProfile.tier === 'PAYGATE_TIER_TWO' ? 'rgba(255, 215, 0, 0.1)' : 'rgba(59, 130, 246, 0.1)', borderRadius: '6px', fontWeight: 600, color: selectedProfile.tier === 'PAYGATE_TIER_TWO' ? '#ffd700' : '#3b82f6' }}>
                                             Tier: {selectedProfile.tier === 'PAYGATE_TIER_TWO' ? '👑 Ultra' : '⭐ Pro'}
@@ -1006,63 +1166,13 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                                         disabled={!selectedProfile || !name.trim() || generating}
                                         style={{ width: '100%', marginTop: '8px' }}
                                     >
-                                        {generating ? '⏳ Đang tạo...' : '✨ Tạo Entity'}
+                                        {generating ? '⏳ Generating...' : '✨ Generate'}
                                     </button>
 
-                                    {/* Error display with retry */}
+                                    {/* Error display */}
                                     {error && (
-                                        <div style={{
-                                            marginTop: '12px',
-                                            padding: '12px',
-                                            background: 'rgba(239, 68, 68, 0.1)',
-                                            borderRadius: '8px',
-                                            border: '1px solid rgba(239, 68, 68, 0.3)'
-                                        }}>
-                                            <div style={{ color: 'var(--error)', fontSize: '0.9rem', marginBottom: '8px' }}>
-                                                {error.includes('403') ? '⚠️ Lỗi Captcha - Google yêu cầu xác minh' : `❌ ${error}`}
-                                            </div>
-                                            <button
-                                                className="btn btn-secondary"
-                                                onClick={handleGenerate}
-                                                style={{ width: '100%' }}
-                                            >
-                                                🔄 Thử lại
-                                            </button>
-                                        </div>
-                                    )}
-
-                                    {/* Preview result with retry */}
-                                    {lastResult && !generating && (
-                                        <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
-                                            <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '8px', color: 'var(--success)' }}>
-                                                ✓ Đã tạo: {lastResult.name}
-                                            </div>
-                                            {lastResult.localPath ? (
-                                                <img
-                                                    src={`/data/entity-references/${selectedProfile?.id}/${getFileName(lastResult.localPath)}`}
-                                                    alt={lastResult.name}
-                                                    style={{ width: '100%', borderRadius: '8px' }}
-                                                    onClick={() => onOpenLightbox?.(`/data/entity-references/${selectedProfile?.id}/${getFileName(lastResult.localPath)}`, lastResult.name)}
-                                                />
-                                            ) : lastResult.remoteUrl ? (
-                                                <img
-                                                    src={lastResult.remoteUrl}
-                                                    alt={lastResult.name}
-                                                    style={{ width: '100%', borderRadius: '8px' }}
-                                                    onClick={() => onOpenLightbox?.(lastResult.remoteUrl, lastResult.name)}
-                                                />
-                                            ) : (
-                                                <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-secondary)' }}>
-                                                    Đang tải ảnh...
-                                                </div>
-                                            )}
-                                            <button
-                                                className="btn btn-secondary"
-                                                onClick={handleGenerate}
-                                                style={{ width: '100%', marginTop: '8px' }}
-                                            >
-                                                🔄 Tạo lại ảnh này
-                                            </button>
+                                        <div style={{ color: 'var(--error)', fontSize: '0.9rem', marginTop: '12px', padding: '8px', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '6px' }}>
+                                            ✗ {error}
                                         </div>
                                     )}
                                 </>
@@ -1107,16 +1217,77 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
 
                         {loading ? (
                             <div className="loading-spinner">Loading...</div>
-                        ) : filteredEntities.length === 0 ? (
-                            <div className="empty-state">
-                                <div style={{ fontSize: '3rem' }}>🎭</div>
-                                <p>No entities yet</p>
-                                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                    Generate your first entity reference image!
-                                </p>
-                            </div>
                         ) : (
                             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '16px' }}>
+                                {/* Generating Card */}
+                                {generatingEntity && (
+                                    <div className="profile-card" style={{ overflow: 'hidden', border: '2px dashed var(--primary-color)' }}>
+                                        <div style={{ position: 'relative', paddingTop: '100%', background: 'var(--bg-secondary)' }}>
+                                            <div style={{
+                                                position: 'absolute',
+                                                top: 0,
+                                                left: 0,
+                                                width: '100%',
+                                                height: '100%',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(168, 85, 247, 0.1) 100%)',
+                                            }}>
+                                                <div style={{
+                                                    width: '60px',
+                                                    height: '60px',
+                                                    border: '4px solid var(--primary-color)',
+                                                    borderTop: '4px solid transparent',
+                                                    borderRadius: '50%',
+                                                    animation: 'spin 1s linear infinite',
+                                                    marginBottom: '12px',
+                                                }} />
+                                                <div style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--primary-color)' }}>
+                                                    Generating...
+                                                </div>
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px', textAlign: 'center', padding: '0 8px' }}>
+                                                    {generatingEntity.name}
+                                                </div>
+                                            </div>
+                                            <div style={{
+                                                position: 'absolute',
+                                                top: '8px',
+                                                left: '8px',
+                                                background: getMaterialColor(generatingEntity.materialId),
+                                                color: 'white',
+                                                padding: '2px 8px',
+                                                borderRadius: '10px',
+                                                fontSize: '0.7rem',
+                                                fontWeight: 600,
+                                            }}>
+                                                {getMaterialLabel(generatingEntity.materialId)}
+                                            </div>
+                                            <div style={{
+                                                position: 'absolute',
+                                                top: '8px',
+                                                right: '8px',
+                                                background: 'rgba(0,0,0,0.7)',
+                                                padding: '4px 8px',
+                                                borderRadius: '4px',
+                                                fontSize: '1rem',
+                                            }}>
+                                                {getEntityIcon(generatingEntity.entityType)}
+                                            </div>
+                                        </div>
+                                        <div style={{ padding: '12px' }}>
+                                            <div style={{ fontWeight: 600, marginBottom: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                {generatingEntity.name}
+                                            </div>
+                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                                🔄 In progress...
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Regular Entity Cards */}
                                 {filteredEntities.map(entity => (
                                     <div key={entity.id} className="profile-card" style={{ overflow: 'hidden' }}>
                                         <div style={{ position: 'relative', paddingTop: '100%', background: 'var(--bg-secondary)', cursor: 'pointer' }}>
@@ -1152,6 +1323,37 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                                             }}>
                                                 {getMaterialLabel(entity.materialId)}
                                             </div>
+                                            {/* Resolution badge */}
+                                            {entity.mediaId?.endsWith('_2k') && (
+                                                <div style={{
+                                                    position: 'absolute',
+                                                    bottom: '8px',
+                                                    left: '8px',
+                                                    background: '#22c55e',
+                                                    color: 'white',
+                                                    padding: '2px 6px',
+                                                    borderRadius: '4px',
+                                                    fontSize: '0.65rem',
+                                                    fontWeight: 700,
+                                                }}>
+                                                    2K
+                                                </div>
+                                            )}
+                                            {entity.mediaId?.endsWith('_4k') && (
+                                                <div style={{
+                                                    position: 'absolute',
+                                                    bottom: '8px',
+                                                    left: '8px',
+                                                    background: '#f59e0b',
+                                                    color: 'white',
+                                                    padding: '2px 6px',
+                                                    borderRadius: '4px',
+                                                    fontSize: '0.65rem',
+                                                    fontWeight: 700,
+                                                }}>
+                                                    4K
+                                                </div>
+                                            )}
                                             <div style={{
                                                 position: 'absolute',
                                                 top: '8px',
@@ -1171,6 +1373,43 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                                             <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
                                                 {new Date(entity.createdAt).toLocaleDateString()}
                                             </div>
+                                            {/* Upscale buttons */}
+                                            <div style={{ display: 'flex', gap: '4px', marginBottom: '8px' }}>
+                                                <button
+                                                    className="btn btn-small"
+                                                    onClick={() => handleUpscale(entity.id, 'UPSAMPLE_IMAGE_RESOLUTION_2K')}
+                                                    disabled={upscallingId === entity.id}
+                                                    style={{
+                                                        flex: 1,
+                                                        padding: '4px 6px',
+                                                        fontSize: '0.75rem',
+                                                        background: entity.mediaId?.endsWith('_2k') ? '#22c55e' : 'var(--bg-secondary)',
+                                                        color: entity.mediaId?.endsWith('_2k') ? 'white' : 'var(--text)',
+                                                        border: '1px solid var(--border)',
+                                                        borderRadius: '4px',
+                                                        cursor: upscallingId === entity.id ? 'wait' : 'pointer',
+                                                    }}
+                                                >
+                                                    {upscallingId === entity.id ? '⏳' : '🖼️'} 2K
+                                                </button>
+                                                <button
+                                                    className="btn btn-small"
+                                                    onClick={() => handleUpscale(entity.id, 'UPSAMPLE_IMAGE_RESOLUTION_4K')}
+                                                    disabled={upscallingId === entity.id}
+                                                    style={{
+                                                        flex: 1,
+                                                        padding: '4px 6px',
+                                                        fontSize: '0.75rem',
+                                                        background: entity.mediaId?.endsWith('_4k') ? '#f59e0b' : 'var(--bg-secondary)',
+                                                        color: entity.mediaId?.endsWith('_4k') ? 'white' : 'var(--text)',
+                                                        border: '1px solid var(--border)',
+                                                        borderRadius: '4px',
+                                                        cursor: upscallingId === entity.id ? 'wait' : 'pointer',
+                                                    }}
+                                                >
+                                                    {upscallingId === entity.id ? '⏳' : '🏔️'} 4K
+                                                </button>
+                                            </div>
                                             <button
                                                 className="btn btn-ghost"
                                                 onClick={() => handleDelete(entity.id)}
@@ -1178,9 +1417,35 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                                             >
                                                 🗑️ Delete
                                             </button>
+                                            <button
+                                                className="btn btn-ghost"
+                                                onClick={() => handleRegenerate(entity)}
+                                                disabled={generating}
+                                                style={{
+                                                    width: '100%',
+                                                    fontSize: '0.85rem',
+                                                    padding: '6px',
+                                                    marginTop: '4px',
+                                                    background: 'var(--bg-secondary)',
+                                                    color: 'var(--text)',
+                                                }}
+                                            >
+                                                🔄 Regenerate
+                                            </button>
                                         </div>
                                     </div>
                                 ))}
+
+                                {/* Empty State */}
+                                {filteredEntities.length === 0 && !generatingEntity && (
+                                    <div className="empty-state">
+                                        <div style={{ fontSize: '3rem' }}>🎭</div>
+                                        <p>No entities yet</p>
+                                        <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                            Generate your first entity reference image!
+                                        </p>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>

@@ -33,6 +33,7 @@ export interface EntityReferenceRecord {
     profileId: string;
     projectId: string;
     aspectRatio: string;
+    upscaleResolution: string;
     metadata: string;
     createdAt: string;
     updatedAt: string;
@@ -115,6 +116,7 @@ export class DatabaseManager {
                 profileId TEXT NOT NULL,
                 projectId TEXT,
                 aspectRatio TEXT DEFAULT 'IMAGE_ASPECT_RATIO_PORTRAIT',
+                upscaleResolution TEXT DEFAULT 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
                 metadata TEXT DEFAULT '{}',
                 createdAt TEXT NOT NULL,
                 updatedAt TEXT NOT NULL,
@@ -126,6 +128,17 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_entity_references_profileId ON entity_references(profileId);
             CREATE INDEX IF NOT EXISTS idx_entity_references_entityType ON entity_references(entityType);
         `);
+
+        // Migration: Add upscaleResolution column if it doesn't exist (for existing databases)
+        try {
+            this.db.exec(`ALTER TABLE entity_references ADD COLUMN upscaleResolution TEXT DEFAULT 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL'`);
+            logger.info('Migration: Added upscaleResolution column to entity_references');
+        } catch (migrationError: any) {
+            // Column already exists or other error - ignore
+            if (!migrationError.message?.includes('duplicate column')) {
+                logger.debug('Migration check for upscaleResolution column: %s', migrationError.message);
+            }
+        }
 
         logger.info('Database tables initialized (simplified - session data stored in Chromium profile)');
     }
@@ -305,8 +318,8 @@ export class DatabaseManager {
     createEntityReference(entity: Omit<EntityReferenceRecord, 'createdAt' | 'updatedAt'>): EntityReferenceRecord {
         const now = new Date().toISOString();
         const stmt = this.db.prepare(`
-            INSERT INTO entity_references (id, name, description, entityType, materialId, mediaId, localPath, remoteUrl, profileId, projectId, aspectRatio, metadata, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO entity_references (id, name, description, entityType, materialId, mediaId, localPath, remoteUrl, profileId, projectId, aspectRatio, upscaleResolution, metadata, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
         stmt.run(
@@ -321,6 +334,7 @@ export class DatabaseManager {
             entity.profileId,
             entity.projectId || '',
             entity.aspectRatio || 'IMAGE_ASPECT_RATIO_PORTRAIT',
+            entity.upscaleResolution || 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
             entity.metadata || '{}',
             now,
             now

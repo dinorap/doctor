@@ -309,6 +309,7 @@ export function useEntities() {
         materialStyle?: any;
         modelKey?: string;
         aspectRatio?: string;
+        upscaleResolution?: string;
     }) => {
         setGenerating(true);
         setError(null);
@@ -326,6 +327,7 @@ export function useEntities() {
                     materialStyle: data.materialStyle,
                     modelKey: data.modelKey,
                     aspectRatio: data.aspectRatio,
+                    upscaleResolution: data.upscaleResolution,
                 }),
             });
             const response = await res.json();
@@ -351,11 +353,31 @@ export function useEntities() {
         setError(null);
     }, []);
 
+    const upscaleEntity = useCallback(async (entityId: string, upscaleResolution: string) => {
+        try {
+            const res = await fetch(`/api/entities/${entityId}/upscale`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ upscaleResolution }),
+            });
+            const response = await res.json();
+            if (response.success) {
+                return response.data;
+            } else {
+                throw new Error(response.error || 'Lỗi khi upscale entity');
+            }
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Lỗi khi upscale entity';
+            throw new Error(message);
+        }
+    }, []);
+
     return {
         generating,
         lastResult,
         error,
         generateEntity,
+        upscaleEntity,
         reset,
     };
 }

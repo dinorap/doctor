@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { ProfileManager } from '../profile-manager/ProfileManager';
 import { CreateProfileRequest, OpenProfileRequest, ApiResponse, PaygateTier } from '../types';
 import logger from '../utils/logger';
@@ -9,7 +10,6 @@ import { DatabaseManager } from '../database/Database';
 import { BrowserManager } from '../browser-manager/BrowserManager';
 import { ExtensionBridgeRegistry } from '../flow-api/ExtensionBridgeRegistry';
 import { FlowApiRegistry } from '../flow-api/FlowApiRegistry';
-import { v4 as uuidv4 } from 'uuid';
 import imageModels from '../../veo_models.json';
 
 const router = express.Router();
@@ -740,7 +740,7 @@ router.post('/flow/projects/prepare-profile', async (req: Request, res: Response
  * (returns 400) so we never accidentally deliver an extension response
  * to the wrong profile.
  */
-router.post('/ext/callback', express.json({ type: '*/*' }), (req: Request, res: Response) => {
+router.post('/ext/callback', express.json({ type: '*/*', limit: '10mb' }), (req: Request, res: Response) => {
     try {
         const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
         const data = req.body || {};
@@ -1611,6 +1611,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             materialStyle,
             modelKey: requestedModelKey,
             aspectRatio: requestedAspectRatio,
+            upscaleResolution = 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
         } = req.body;
 
         // Validate required fields
@@ -1643,6 +1644,19 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             return res.status(400).json({
                 success: false,
                 error: `Invalid modelKey. Must be one of: ${VALID_MODEL_KEYS.join(', ')}`,
+            });
+        }
+
+        // Validate upscale resolution
+        const VALID_UPSCALE_RESOLUTIONS = [
+            'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
+            'UPSAMPLE_IMAGE_RESOLUTION_2K',
+            'UPSAMPLE_IMAGE_RESOLUTION_4K'
+        ];
+        if (!VALID_UPSCALE_RESOLUTIONS.includes(upscaleResolution)) {
+            return res.status(400).json({
+                success: false,
+                error: `Invalid upscaleResolution. Must be one of: ${VALID_UPSCALE_RESOLUTIONS.join(', ')}`,
             });
         }
 
@@ -1769,18 +1783,105 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             });
         }
 
+        // Upscale if requested (2K or 4K)
+        let finalMediaId = mediaId;
+        let finalServingUri = servingUri;
+        let upscaledLocalPath = ''; // Track the upscaled file path
+
+        if (upscaleResolution !== 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' && mediaId) {
+            try {
+                // Use bridge's upscaleImage method
+                if (bridge && bridge.isConnected()) {
+                    logger.info(`Upscaling image ${mediaId} to ${upscaleResolution} via ExtensionBridge`);
+
+                    const entitiesDir = path.join(process.cwd(), 'data', 'entity-references', profileId);
+                    const ext = servingUri?.includes('.png') ? 'png' : 'jpg';
+                    const upscaleSuffix = upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '_4k' : '_2k';
+                    const upscalePath = path.join(entitiesDir, `${mediaId}${upscaleSuffix}.${ext}`);
+
+                    // Call upscaleImage via bridge
+                    const upscaleResponse = await bridge.upscaleImage({
+                        mediaId,
+                        targetResolution: upscaleResolution,
+                        projectId: targetProjectId,
+                    });
+
+                    logger.info(`[Image Upscale] Response: ${JSON.stringify(upscaleResponse)?.substring(0, 500)}`);
+
+                    // Parse response - could be:
+                    // 1. { name: "operations/xxx", done: true, metadata: { image: { fifeUrl: "..." } } }
+                    // 2. { encodedImage: "base64..." } (direct base64 response)
+                    const encodedImage = upscaleResponse?.encodedImage;
+                    const opName = upscaleResponse?.name;
+                    const opDone = upscaleResponse?.done;
+                    const opMetadata = upscaleResponse?.metadata || {};
+                    const imageMeta = opMetadata.image || {};
+                    const fifeUrl = imageMeta.fifeUrl;
+
+                    if (encodedImage) {
+                        // Direct base64 response
+                        const upscaleSuffix = upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '_4k' : '_2k';
+                        finalMediaId = mediaId + upscaleSuffix;
+                        
+                        // Save base64 as image file
+                        try {
+                            if (!fs.existsSync(entitiesDir)) {
+                                fs.mkdirSync(entitiesDir, { recursive: true });
+                            }
+                            const imageBuffer = Buffer.from(encodedImage, 'base64');
+                            fs.writeFileSync(upscalePath, imageBuffer);
+                            upscaledLocalPath = upscalePath;
+                            logger.info(`Image upscaled (base64) and saved to: ${upscalePath} (${imageBuffer.length} bytes)`);
+                        } catch (saveError) {
+                            logger.warn(`Failed to save upscaled image: ${saveError}`);
+                        }
+                    } else if (opDone && fifeUrl) {
+                        // Operation response with fifeUrl
+                        const upscaledUrl = fifeUrl;
+                        const upscaleSuffix = upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '_4k' : '_2k';
+                        finalMediaId = mediaId + upscaleSuffix;
+                        finalServingUri = upscaledUrl;
+
+                        // Download the upscaled image
+                        try {
+                            if (!fs.existsSync(entitiesDir)) {
+                                fs.mkdirSync(entitiesDir, { recursive: true });
+                            }
+                            const imageResponse = await fetch(upscaledUrl);
+                            if (imageResponse.ok) {
+                                const buffer = await imageResponse.arrayBuffer();
+                                fs.writeFileSync(upscalePath, Buffer.from(buffer));
+                                upscaledLocalPath = upscalePath;
+                                logger.info(`Image upscaled and saved to: ${upscalePath}`);
+                            }
+                        } catch (downloadError) {
+                            logger.warn(`Failed to download upscaled image: ${downloadError}`);
+                        }
+                    } else if (opName && !opDone) {
+                        logger.info('Image upscale pending, polling...');
+                    } else {
+                        logger.warn('Image upscale response unexpected: %s', JSON.stringify(upscaleResponse)?.slice(0, 200));
+                    }
+                } else {
+                    logger.warn('Bridge not connected, cannot upscale image');
+                }
+            } catch (upscaleError: any) {
+                logger.warn(`Image upscale error: ${upscaleError.message}. Using original image.`);
+            }
+        }
+
         // Download image to local storage
-        let localPath = '';
-        if (servingUri && mediaId) {
+        let localPath = upscaledLocalPath; // Use upscaled path if available
+        if (!localPath && finalServingUri && finalMediaId) {
             try {
                 const entitiesDir = path.join(process.cwd(), 'data', 'entity-references', profileId);
                 if (!fs.existsSync(entitiesDir)) {
                     fs.mkdirSync(entitiesDir, { recursive: true });
                 }
-                const ext = servingUri.includes('.png') ? 'png' : 'jpg';
-                localPath = path.join(entitiesDir, `${mediaId}.${ext}`);
+                const ext = finalServingUri.includes('.png') ? 'png' : 'jpg';
+                localPath = path.join(entitiesDir, `${finalMediaId}.${ext}`);
 
-                const imageResponse = await fetch(servingUri);
+                const imageResponse = await fetch(finalServingUri);
                 if (imageResponse.ok) {
                     const buffer = await imageResponse.arrayBuffer();
                     fs.writeFileSync(localPath, Buffer.from(buffer));
@@ -1801,16 +1902,19 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             description: description || '',
             entityType,
             materialId,
-            mediaId: mediaId || '',
+            mediaId: finalMediaId || '',
             localPath,
-            remoteUrl: servingUri || '',
+            remoteUrl: finalServingUri || '',
             profileId,
             projectId: targetProjectId || '',
             aspectRatio,
+            upscaleResolution,
             metadata: JSON.stringify({
                 generatedAt: new Date().toISOString(),
                 tier,
                 modelKey: apiModelKey,
+                upscaleResolution,
+                originalMediaId: upscaleResolution !== 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' ? mediaId : undefined,
             }),
         });
 
@@ -1820,6 +1924,161 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
         });
     } catch (error: any) {
         logger.error('Error generating entity:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * POST /entities/:id/upscale - Upscale an existing entity image
+ */
+router.post('/entities/:id/upscale', async (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const profileManager = new ProfileManager(db);
+        const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
+
+        const { upscaleResolution } = req.body;
+        const VALID_UPSCALE_RESOLUTIONS = [
+            'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
+            'UPSAMPLE_IMAGE_RESOLUTION_2K',
+            'UPSAMPLE_IMAGE_RESOLUTION_4K'
+        ];
+
+        if (!upscaleResolution || !VALID_UPSCALE_RESOLUTIONS.includes(upscaleResolution)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid upscaleResolution. Must be one of: ' + VALID_UPSCALE_RESOLUTIONS.join(', '),
+            });
+        }
+
+        const entity = db.getEntityReference(req.params.id);
+        if (!entity) {
+            return res.status(404).json({
+                success: false,
+                error: 'Entity not found',
+            });
+        }
+
+        if (upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL') {
+            return res.json({
+                success: true,
+                data: entity,
+                message: 'No upscale needed - using original',
+            });
+        }
+
+        const profileId = entity.profileId;
+        const profile = profileManager.getProfile(profileId);
+        if (!profile) {
+            return res.status(404).json({
+                success: false,
+                error: 'Profile not found for this entity',
+            });
+        }
+
+        const bridge = extensionRegistry?.get(profileId);
+        if (!bridge || !bridge.isConnected()) {
+            return res.status(503).json({
+                success: false,
+                error: 'Browser not open for this profile. Please open the profile first.',
+            });
+        }
+
+        // Extract mediaId from the entity's mediaId field
+        const originalMediaId = entity.mediaId.replace(/_(2k|4k)$/i, '');
+
+        logger.info(`[Upscale Entity] Upscaling entity ${req.params.id}: mediaId=${originalMediaId}, resolution=${upscaleResolution}`);
+
+        // Call upscaleImage via bridge
+        const upscaleResponse = await bridge.upscaleImage({
+            mediaId: originalMediaId,
+            targetResolution: upscaleResolution,
+            projectId: entity.projectId,
+        });
+
+        logger.info(`[Upscale Entity] Response: ${JSON.stringify(upscaleResponse)?.substring(0, 500)}`);
+
+        // Parse response
+        const encodedImage = upscaleResponse?.encodedImage;
+        const opName = upscaleResponse?.name;
+        const opDone = upscaleResponse?.done;
+        const opMetadata = upscaleResponse?.metadata || {};
+        const imageMeta = opMetadata.image || {};
+        const fifeUrl = imageMeta.fifeUrl;
+
+        const entitiesDir = path.join(process.cwd(), 'data', 'entity-references', profileId);
+        const ext = entity.localPath?.includes('.png') ? 'png' : 'jpg';
+        const upscaleSuffix = upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '_4k' : '_2k';
+        const newMediaId = originalMediaId + upscaleSuffix;
+        const upscalePath = path.join(entitiesDir, `${newMediaId}.${ext}`);
+
+        let localPath = entity.localPath;
+        let remoteUrl = entity.remoteUrl;
+
+        if (encodedImage) {
+            // Direct base64 response
+            try {
+                if (!fs.existsSync(entitiesDir)) {
+                    fs.mkdirSync(entitiesDir, { recursive: true });
+                }
+                const imageBuffer = Buffer.from(encodedImage, 'base64');
+                fs.writeFileSync(upscalePath, imageBuffer);
+                localPath = upscalePath;
+                logger.info(`Image upscaled (base64) and saved to: ${upscalePath} (${imageBuffer.length} bytes)`);
+            } catch (saveError) {
+                logger.warn(`Failed to save upscaled image: ${saveError}`);
+            }
+        } else if (opDone && fifeUrl) {
+            // Operation response with fifeUrl
+            remoteUrl = fifeUrl;
+
+            // Download the upscaled image
+            try {
+                if (!fs.existsSync(entitiesDir)) {
+                    fs.mkdirSync(entitiesDir, { recursive: true });
+                }
+                const imageResponse = await fetch(fifeUrl);
+                if (imageResponse.ok) {
+                    const buffer = await imageResponse.arrayBuffer();
+                    fs.writeFileSync(upscalePath, Buffer.from(buffer));
+                    localPath = upscalePath;
+                    logger.info(`Image upscaled and saved to: ${upscalePath}`);
+                }
+            } catch (downloadError) {
+                logger.warn(`Failed to download upscaled image: ${downloadError}`);
+            }
+        } else if (opName && !opDone) {
+            // Pending - wait for completion (simplified: return as-is)
+            logger.info('Image upscale pending...');
+        } else {
+            logger.warn('Image upscale response unexpected: %s', JSON.stringify(upscaleResponse)?.slice(0, 200));
+        }
+
+        // Update entity record
+        db.updateEntityReference(req.params.id, {
+            mediaId: newMediaId,
+            localPath,
+            remoteUrl,
+            metadata: JSON.stringify({
+                ...JSON.parse(entity.metadata || '{}'),
+                upscaleResolution,
+                originalMediaId,
+                upscaledAt: new Date().toISOString(),
+            }),
+        });
+
+        const updatedEntity = db.getEntityReference(req.params.id);
+
+        res.json({
+            success: true,
+            data: updatedEntity,
+            message: `Image upscaled to ${upscaleResolution.replace('UPSAMPLE_IMAGE_RESOLUTION_', '')}`,
+        });
+    } catch (error: any) {
+        logger.error('Error upscaling entity:', error);
         res.status(500).json({
             success: false,
             error: error.message,

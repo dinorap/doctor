@@ -347,6 +347,8 @@ function connectToAgent() {
 
       if (msg.method === 'api_request') {
         await handleApiRequest(msg);
+      } else if (msg.method === 'upscaleImage') {
+        await handleUpscaleImage(msg);
       } else if (msg.method === 'trpc_request') {
         await handleTrpcRequest(msg);
       } else if (msg.method === 'solve_captcha') {
@@ -550,6 +552,120 @@ async function handleTrpcRequest(msg) {
   } finally {
     setState('idle');
   }
+}
+
+// ─── Upscale Image Handler ───────────────────────────────────
+
+async function handleUpscaleImage(msg) {
+  const { id, params } = msg;
+  const { mediaId, targetResolution, clientContext } = params;
+
+  // Support both new format (mediaId) and old format (requests array)
+  const reqMediaId = mediaId || params.requests?.[0]?.imageInput?.mediaId;
+  const reqResolution = targetResolution || params.requests?.[0]?.targetResolution || 'UPSAMPLE_IMAGE_RESOLUTION_2K';
+  const reqProjectId = clientContext?.projectId || params.requests?.[0]?.projectId || '';
+
+  if (!reqMediaId) {
+    sendToAgent({ id, profileId, error: 'NO_UPSCALE_REQUESTS' });
+    return;
+  }
+
+  setState('running');
+
+  const logId = id;
+  const logType = 'UPS_IMG';
+  if (_VISIBLE_TYPES.has(logType)) {
+    addRequestLog({
+      id: logId,
+      type: logType,
+      time: new Date().toISOString(),
+      status: 'processing',
+      error: null,
+      outputUrl: null,
+      url: 'upscaleImage',
+      payloadSummary: JSON.stringify({ mediaId: reqMediaId, targetResolution: reqResolution }).slice(0, 200)
+    });
+  }
+
+  try {
+    // Step 1: Get flowKey (required for API call)
+    const activeFlowKey = flowKey;
+    if (!activeFlowKey) {
+      sendToAgent({ id, profileId, error: 'NO_FLOW_KEY' });
+      updateRequestLog(logId, { status: 'failed', error: 'NO_FLOW_KEY' });
+      setState('idle');
+      return;
+    }
+
+    // Step 2: Try to get captcha token, but don't fail if not available
+    let captchaToken = '';
+    try {
+      const captchaResult = await solveCaptcha(id, 'IMAGE_GENERATION');
+      captchaToken = captchaResult?.token || '';
+    } catch (e) {
+      console.log('[FlowAgent] Could not get captcha, proceeding without');
+    }
+
+    // Step 3: Build the request body with captcha token (new format)
+    const body = {
+      mediaId: reqMediaId,
+      targetResolution: reqResolution,
+      clientContext: {
+        recaptchaContext: {
+          token: captchaToken,
+          applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+        },
+        projectId: reqProjectId,
+        tool: 'PINHOLE',
+        userPaygateTier: 'PAYGATE_TIER_TWO',
+        sessionId: crypto.randomUUID(),
+      },
+    };
+
+    // Step 4: Make the upscale API call
+    const response = await fetch('https://aisandbox-pa.googleapis.com/v1/flow/upsampleImage', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'authorization': `Bearer ${activeFlowKey}`,
+      },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    });
+
+    let responseData;
+    const responseText = await response.text();
+    try {
+      responseData = JSON.parse(responseText);
+    } catch {
+      responseData = responseText;
+    }
+
+    sendToAgent({
+      id,
+      profileId,
+      status: response.status,
+      data: responseData,
+    });
+
+    const responseSummary = responseText ? responseText.slice(0, 300) : null;
+    if (response.ok) {
+      updateRequestLog(logId, { status: 'success', httpStatus: response.status, responseSummary });
+    } else {
+      updateRequestLog(logId, { status: 'failed', error: `API_${response.status}`, httpStatus: response.status, responseSummary });
+    }
+  } catch (e) {
+    console.error('[FlowAgent] UpscaleImage request failed:', e);
+    sendToAgent({
+      id,
+      profileId,
+      status: 500,
+      error: e.message || 'UPSCALE_REQUEST_FAILED',
+    });
+    updateRequestLog(logId, { status: 'failed', error: e.message || 'UPSCALE_REQUEST_FAILED' });
+  }
+
+  setState('idle');
 }
 
 async function handleApiRequest(msg) {

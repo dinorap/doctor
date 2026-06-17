@@ -353,6 +353,48 @@ export class ExtensionBridge extends EventEmitter {
         return response?.data ?? response;
     }
 
+    public async upscaleImage(params: {
+        mediaId: string;
+        targetResolution: string;
+        projectId?: string;
+    }): Promise<any> {
+        // Use longer timeout for 4K upscale
+        const is4K = params.targetResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K';
+        const savedTimeout = this.timeoutMs;
+        if (is4K) {
+            this.timeoutMs = 180000; // 3 min for 4K
+        }
+
+        try {
+            const body = {
+                mediaId: params.mediaId,
+                targetResolution: params.targetResolution,
+                clientContext: {
+                    recaptchaContext: {
+                        applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                        token: '',
+                    },
+                    projectId: params.projectId || '',
+                    tool: 'PINHOLE',
+                    userPaygateTier: 'PAYGATE_TIER_TWO',
+                    sessionId: crypto.randomUUID(),
+                },
+            };
+
+            logger.info('[Image Upscale] Request body: %s', JSON.stringify(body));
+
+            const response: any = await this.sendRequest('upscaleImage', body);
+
+            if (response?.error) {
+                throw new Error(response.error);
+            }
+
+            return response?.data ?? response;
+        } finally {
+            this.timeoutMs = savedTimeout;
+        }
+    }
+
     public dispose(): void {
         // Reject any in-flight requests so promises don't hang
         for (const [, entry] of this.pending) {
