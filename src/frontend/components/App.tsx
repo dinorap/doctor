@@ -1,8 +1,44 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { useProfiles, useCloakBrowser } from '../hooks/useProfiles';
+import { useProfiles, useCloakBrowser, useFlowImages, useEntities } from '../hooks/useProfiles';
 import { useWebSocket } from '../hooks/useWebSocket';
-import type { Profile, FlowProject } from '../types';
+import type { Profile, FlowProject, GeneratedImageResult } from '../types';
+import { api } from '../services/api';
 import '../styles/App.css';
+
+// Helper to extract filename from path (browser-compatible)
+const getFileName = (filePath: string) => filePath.split(/[/\\]/).pop() || filePath;
+
+// Lightbox component
+function ImageLightbox({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) {
+    return (
+        <div
+            style={{
+                position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                background: 'rgba(0,0,0,0.9)', zIndex: 9999,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                cursor: 'pointer'
+            }}
+            onClick={onClose}
+        >
+            <img
+                src={src}
+                alt={alt}
+                style={{ maxWidth: '90vw', maxHeight: '90vh', objectFit: 'contain', borderRadius: '8px' }}
+            />
+            <button
+                onClick={onClose}
+                style={{
+                    position: 'absolute', top: 20, right: 20,
+                    background: 'rgba(255,255,255,0.2)', border: 'none',
+                    color: 'white', fontSize: '24px', width: 40, height: 40,
+                    borderRadius: '50%', cursor: 'pointer'
+                }}
+            >
+                ×
+            </button>
+        </div>
+    );
+}
 
 // Notification component
 function Notification({ message, type, onClose }: { message: string; type: 'success' | 'error' | 'info'; onClose: () => void }) {
@@ -44,6 +80,8 @@ function Sidebar({ activeTab, onTabChange, totalProfiles, activeSessions, cloakS
     const menuItems = [
         { id: 'profiles', icon: '👤', label: 'Profile Manager' },
         { id: 'flow-projects', icon: '🌊', label: 'Flow Projects' },
+        { id: 'flow-images', icon: '🖼️', label: 'Flow Images' },
+        { id: 'entities', icon: '🎭', label: 'Entity Library' },
         { id: 'about', icon: '🛡️', label: 'CloakBrowser' },
     ];
 
@@ -536,6 +574,739 @@ function ProfilesTab({ profiles, loading, onCreateProfile, onOpenProfile, onClos
     );
 }
 
+// Entities Tab
+interface EntityReference {
+    id: string;
+    name: string;
+    description: string;
+    entityType: string;
+    materialId: string;
+    mediaId: string;
+    localPath: string;
+    remoteUrl: string;
+    profileId: string;
+    projectId: string;
+    aspectRatio: string;
+    metadata: string;
+    createdAt: string;
+}
+
+interface MaterialStyle {
+    id: string;
+    label: string;
+    color: string;
+    style_instruction: string;
+    negative_prompt: string;
+    scene_prefix: string;
+    lighting: string;
+}
+
+interface EntitiesTabProps {
+    profiles: Profile[];
+    onOpenProfile?: (profileId: string) => Promise<void>;
+    onWaitForProfileReady?: (profileId: string, timeoutMs?: number) => Promise<void>;
+    onOpenLightbox?: (src: string, alt: string) => void;
+}
+
+const DEFAULT_MATERIALS: MaterialStyle[] = [
+    { id: '3d_pixar', label: '3D Pixar', color: '#4CAF50', style_instruction: '3D animated style, Pixar-quality rendering, Disney-Pixar aesthetic. Smooth subsurface scattering skin, expressive cartoon eyes, stylized proportions, vibrant saturated colors.', negative_prompt: 'NOT photorealistic, NOT photograph, NOT live action, NOT anime, NOT flat 2D.', scene_prefix: '3D animated Pixar-quality rendering, vibrant colors, cinematic lighting.', lighting: 'Studio lighting, global illumination, highly detailed' },
+    { id: 'realistic', label: 'Photorealistic', color: '#2196F3', style_instruction: 'Photorealistic RAW photograph, shot on Canon EOS R5, 35mm lens, natural available light, real footage.', negative_prompt: 'NOT 3D render, NOT CGI, NOT digital art, NOT illustration, NOT anime, NOT painting, NOT cartoon.', scene_prefix: 'Real RAW photograph, shot on Canon EOS R5, 35mm lens, natural available light.', lighting: 'Studio lighting, highly detailed' },
+    { id: 'anime', label: 'Anime', color: '#E91E63', style_instruction: 'Japanese anime style, cel-shaded rendering, vibrant saturated colors, clean sharp linework, large expressive eyes, stylized anatomy. High-quality anime production, studio Ghibli meets modern anime aesthetic.', negative_prompt: 'NOT photorealistic, NOT 3D render, NOT oil painting, NOT sketch, NOT watercolor, NOT Western cartoon.', scene_prefix: 'Anime style, cel-shaded, vibrant colors, clean linework, dramatic anime lighting.', lighting: 'Anime-style dramatic lighting, highly detailed' },
+    { id: 'ghibli', label: 'Studio Ghibli', color: '#9C27B0', style_instruction: 'Studio Ghibli anime style, hand-painted watercolor backgrounds, soft pastel colors, gentle rounded character designs, whimsical atmosphere. Hayao Miyazaki aesthetic, detailed natural environments, magical realism.', negative_prompt: 'NOT photorealistic, NOT 3D render, NOT dark, NOT gritty, NOT sharp edges, NOT Western cartoon.', scene_prefix: 'Studio Ghibli anime style, hand-painted watercolor backgrounds, soft pastel colors, gentle whimsical atmosphere.', lighting: 'Soft natural Ghibli lighting, golden hour warmth, dappled sunlight' },
+    { id: 'comic_book', label: 'Comic Book', color: '#FF9800', style_instruction: 'American comic book art style, bold black ink outlines, flat vibrant colors with halftone dot shading, dynamic action poses, dramatic foreshortening. Marvel/DC superhero comic aesthetic, Ben-Day dots, speech bubble ready.', negative_prompt: 'NOT photorealistic, NOT 3D render, NOT anime, NOT watercolor, NOT soft edges, NOT muted colors.', scene_prefix: 'Comic book style, bold ink outlines, vibrant flat colors, halftone shading, dynamic composition.', lighting: 'High contrast comic lighting, dramatic shadows, rim light' },
+    { id: 'cyberpunk', label: 'Cyberpunk', color: '#00BCD4', style_instruction: 'Cyberpunk sci-fi aesthetic, neon-lit dark urban environment, holographic displays, rain-slicked streets reflecting neon signs. Blade Runner meets Ghost in the Shell, high-tech low-life, chrome and glass, purple and cyan color palette.', negative_prompt: 'NOT natural environment, NOT bright daylight, NOT historical, NOT cartoon, NOT fantasy medieval.', scene_prefix: 'Cyberpunk aesthetic, neon-lit dark urban, holographic displays, rain-slicked streets, purple and cyan neon.', lighting: 'Neon rim lighting, volumetric fog, cyan and magenta' },
+    { id: 'stop_motion', label: 'Stop Motion', color: '#795548', style_instruction: 'Stop-motion animation style with handcrafted felt and wood puppets. Visible felt fabric texture, wooden joints and dowels, miniature handmade set pieces, warm craft workshop lighting. Laika Studios / Wes Anderson stop-motion aesthetic.', negative_prompt: 'NOT photorealistic, NOT 3D render, NOT digital, NOT anime, NOT smooth surfaces, NOT plastic.', scene_prefix: 'Stop-motion style, handcrafted felt and wood puppets, miniature set, warm workshop lighting.', lighting: 'Warm practical miniature lighting, macro photography detail' },
+    { id: 'minecraft', label: 'Minecraft', color: '#8BC34A', style_instruction: 'Minecraft voxel art style, blocky cubic geometry, pixel textures, 16x16 texture resolution aesthetic, square heads and bodies. Everything made of cubes and rectangular prisms. Minecraft game screenshot aesthetic.', negative_prompt: 'NOT smooth, NOT round, NOT photorealistic, NOT anime, NOT organic curves, NOT high-poly.', scene_prefix: 'Minecraft style, blocky voxel world, pixel textures, cubic geometry, game screenshot aesthetic.', lighting: 'Minecraft-style ambient lighting, block shadows' },
+    { id: 'oil_painting', label: 'Oil Painting', color: '#FFC107', style_instruction: 'Classical oil painting on canvas, visible thick brushstrokes, rich impasto texture, warm color palette, chiaroscuro lighting. Renaissance masters meets impressionist technique. Museum-quality fine art painting.', negative_prompt: 'NOT photorealistic, NOT digital art, NOT 3D render, NOT anime, NOT flat colors, NOT cartoon.', scene_prefix: 'Oil painting style, visible brushstrokes, rich impasto texture, warm palette, dramatic chiaroscuro lighting.', lighting: 'Dramatic chiaroscuro lighting, rich tonal depth' },
+    { id: 'watercolor', label: 'Watercolor', color: '#03A9F4', style_instruction: 'Soft watercolor painting on cold-press paper, loose wet brushwork, translucent color washes bleeding into each other, white paper showing through. Delicate ink outlines, impressionistic and dreamy.', negative_prompt: 'NOT photorealistic, NOT 3D render, NOT digital art, NOT anime, NOT sharp edges, NOT bold outlines.', scene_prefix: 'Watercolor painting style, soft wet brushwork, translucent color washes, delicate ink outlines.', lighting: 'Soft diffused natural light, watercolor wash' },
+    { id: 'claymation', label: 'Claymation', color: '#FF5722', style_instruction: 'Clay animation style, characters made of modeling clay with visible fingerprint textures, slightly imperfect sculpted features. Wallace & Gromit / Aardman aesthetic, miniature handmade sets, warm practical lighting on tiny clay world.', negative_prompt: 'NOT photorealistic, NOT digital, NOT anime, NOT smooth skin, NOT 3D render, NOT glass or metal surfaces.', scene_prefix: 'Claymation style, clay puppet characters with fingerprint textures, miniature handmade sets, warm practical lighting.', lighting: 'Warm miniature set lighting, soft shadows, macro detail' },
+    { id: 'lego', label: 'LEGO', color: '#F44336', style_instruction: 'LEGO brick style, characters are LEGO minifigures with yellow skin and claw hands, environments built entirely from LEGO bricks and plates. Visible brick studs, ABS plastic texture, The LEGO Movie aesthetic.', negative_prompt: 'NOT photorealistic, NOT organic, NOT smooth, NOT anime, NOT round shapes, NOT natural materials.', scene_prefix: 'LEGO style, minifigure characters, brick-built environments, visible studs, plastic ABS texture.', lighting: 'Bright toy photography lighting, sharp focus, product shot quality' },
+    { id: 'retro_vhs', label: 'Retro VHS', color: '#9E9E9E', style_instruction: '1980s VHS tape aesthetic, analog video noise and scan lines, slightly washed-out warm colors, CRT TV curvature, tracking artifacts. Retro camcorder footage feel, date stamp overlay, nostalgic grain.', negative_prompt: 'NOT modern, NOT 4K, NOT clean, NOT digital, NOT anime, NOT sharp, NOT high-definition.', scene_prefix: 'Retro VHS style, analog scan lines, warm washed-out colors, CRT curvature, nostalgic 80s grain.', lighting: 'Warm tungsten lighting, CRT glow, analog video bloom' },
+];
+
+function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLightbox }: EntitiesTabProps) {
+    const { generating, lastResult, error, generateEntity, reset: resetResult } = useEntities();
+    const [entities, setEntities] = useState<EntityReference[]>([]);
+    const [loading, setLoading] = useState(true);
+    // Cascading selectors
+    const [selectedProjectName, setSelectedProjectName] = useState<string>('');
+    const [selectedProfileIdx, setSelectedProfileIdx] = useState<number>(0);
+    const [name, setName] = useState('');
+    const [description, setDescription] = useState('');
+    const [entityType, setEntityType] = useState('character');
+    const [materialId, setMaterialId] = useState('3d_pixar');
+    const [modelKey, setModelKey] = useState('NANO_BANANA_PRO');
+    const [aspectRatio, setAspectRatio] = useState('IMAGE_ASPECT_RATIO_PORTRAIT');
+    const [filter, setFilter] = useState<string>('all');
+    // Material style manager
+    const [materials, setMaterials] = useState<MaterialStyle[]>(DEFAULT_MATERIALS);
+    const [showMaterialEditor, setShowMaterialEditor] = useState(false);
+    const [editingMaterial, setEditingMaterial] = useState<MaterialStyle | null>(null);
+    const [materialForm, setMaterialForm] = useState<MaterialStyle>({ id: '', label: '', color: '#4CAF50', style_instruction: '', negative_prompt: '', scene_prefix: '', lighting: '' });
+
+    const ENTITY_TYPES = [
+        { value: 'character', label: 'Character', icon: '👤' },
+        { value: 'location', label: 'Location', icon: '🏔️' },
+        { value: 'creature', label: 'Creature', icon: '🐉' },
+        { value: 'visual_asset', label: 'Visual Asset', icon: '⚔️' },
+        { value: 'generic_troop', label: 'Troop', icon: '🛡️' },
+        { value: 'faction', label: 'Faction', icon: '🏴' },
+    ];
+
+    // Group profiles by project name (cascading)
+    type ProjectEntry = { profile: Profile; projectIdx: number; projectName: string };
+    const projectGroups: Record<string, ProjectEntry[]> = {};
+    profiles.forEach((profile) => {
+        const flowProjects: any[] = (profile.metadata as any)?.flowProjects || [];
+        flowProjects.forEach((proj: any, idx: number) => {
+            const name = proj.name || `Project ${idx + 1}`;
+            if (!projectGroups[name]) projectGroups[name] = [];
+            projectGroups[name].push({ profile, projectIdx: idx, projectName: name });
+        });
+    });
+
+    const projectNames = Object.keys(projectGroups).sort();
+    const selectedEntries = projectGroups[selectedProjectName] || [];
+    const selectedEntry = selectedEntries[selectedProfileIdx];
+    const selectedProfile = selectedEntry?.profile;
+    const selectedProjectIdx = selectedEntry?.projectIdx ?? 0;
+    const selectedProjectObj = selectedProfile ? (selectedProfile.metadata as any)?.flowProjects?.[selectedProjectIdx] : null;
+
+    // Load all entities globally
+    const loadEntities = useCallback(async () => {
+        setLoading(true);
+        try {
+            const res = await fetch('/api/entities');
+            const data = await res.json();
+            if (data.success) {
+                setEntities(data.data);
+            }
+        } catch (e) {
+            console.error('Failed to load entities:', e);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        loadEntities();
+    }, [loadEntities]);
+
+    const handleGenerate = async () => {
+        if (!selectedProfile || !name.trim() || generating) return;
+
+        const selectedMaterial = materials.find(m => m.id === materialId);
+
+        // Auto-open profile if not already running and wait for it to be ready
+        if (selectedProfile.status !== 'running') {
+            if (onOpenProfile) {
+                try {
+                    await onOpenProfile(selectedProfile.id);
+                } catch (e) {
+                    console.warn('Could not auto-open profile:', e);
+                }
+            }
+        }
+
+        // Wait for profile to be ready (extension connected, flowKey captured)
+        if (onWaitForProfileReady) {
+            try {
+                await onWaitForProfileReady(selectedProfile.id, 30000);
+            } catch (e) {
+                console.warn('Profile may not be fully ready:', e);
+            }
+        }
+
+        try {
+            const result = await generateEntity({
+                name: name.trim(),
+                description: description.trim(),
+                entityType,
+                materialId,
+                profileId: selectedProfile.id,
+                projectId: selectedProjectObj?.projectId,
+                materialStyle: selectedMaterial,
+                modelKey,
+                aspectRatio,
+            });
+            if (result) {
+                setEntities(prev => [result, ...prev]);
+                setName('');
+                setDescription('');
+            }
+        } catch (e) {
+            // error is surfaced via `error` prop from useEntities
+        }
+    };
+
+    const handleDelete = async (id: string) => {
+        if (!confirm('Delete this entity?')) return;
+        try {
+            const res = await fetch(`/api/entities/${id}`, { method: 'DELETE' });
+            const data = await res.json();
+            if (data.success) {
+                setEntities(prev => prev.filter(e => e.id !== id));
+            }
+        } catch (e) {
+            alert('Failed to delete entity');
+        }
+    };
+
+    const getEntityIcon = (type: string) => ENTITY_TYPES.find(t => t.value === type)?.icon || '📦';
+    const getMaterialColor = (id: string) => materials.find(m => m.value === id)?.color || materials.find(m => m.id === id)?.color || '#666';
+    const getMaterialLabel = (id: string) => materials.find(m => m.value === id)?.label || materials.find(m => m.id === id)?.label || id;
+
+    const filteredEntities = filter === 'all'
+        ? entities
+        : entities.filter(e => e.entityType === filter);
+
+    // Material style editor handlers
+    const openAddMaterial = () => {
+        setMaterialForm({ id: '', label: '', color: '#4CAF50', style_instruction: '', negative_prompt: '', scene_prefix: '', lighting: '' });
+        setEditingMaterial(null);
+        setShowMaterialEditor(true);
+    };
+
+    const openEditMaterial = (mat: MaterialStyle) => {
+        setMaterialForm({ ...mat });
+        setEditingMaterial(mat);
+        setShowMaterialEditor(true);
+    };
+
+    const saveMaterial = () => {
+        if (!materialForm.id.trim() || !materialForm.label.trim()) {
+            alert('ID and Label are required');
+            return;
+        }
+        if (editingMaterial) {
+            setMaterials(prev => prev.map(m => m.id === editingMaterial.id ? { ...materialForm, id: materialForm.id } : m));
+        } else {
+            if (materials.find(m => m.id === materialForm.id)) {
+                alert('Material ID already exists');
+                return;
+            }
+            setMaterials(prev => [...prev, { ...materialForm }]);
+        }
+        setShowMaterialEditor(false);
+    };
+
+    const deleteMaterial = (id: string) => {
+        if (!confirm('Delete material "' + materials.find(m => m.id === id)?.label + '"?')) return;
+        setMaterials(prev => prev.filter(m => m.id !== id));
+    };
+
+    return (
+        <>
+            <div className="content-header">
+                <div className="header-left">
+                    <h2><span>🎭</span> Entity Library</h2>
+                </div>
+            </div>
+            <div className="content-body">
+                <div style={{ display: 'grid', gridTemplateColumns: '400px 1fr', gap: '24px' }}>
+                    {/* Left: Generate Form */}
+                    <div className="profile-card">
+                        <div className="profile-header">
+                            <div className="profile-title">
+                                <div className="profile-avatar">✨</div>
+                                <div>
+                                    <div className="profile-name">Generate Entity</div>
+                                    <div className="profile-path">Create reference images for projects</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div style={{ padding: '16px' }}>
+                            {projectNames.length === 0 ? (
+                                <div className="empty-state">
+                                    <p>No profiles with Flow projects available.</p>
+                                    <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Create a Flow project first.</p>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* Cascading: Project → Profile */}
+                                    <div className="form-group">
+                                        <label className="form-label">Project</label>
+                                        <select
+                                            className="form-input"
+                                            value={selectedProjectName}
+                                            onChange={(e) => {
+                                                setSelectedProjectName(e.target.value);
+                                                setSelectedProfileIdx(0);
+                                            }}
+                                        >
+                                            <option value="">-- Chọn project --</option>
+                                            {projectNames.map(name => (
+                                                <option key={name} value={name}>{name} ({projectGroups[name].length} profile)</option>
+                                            ))}
+                                        </select>
+                                    </div>
+
+                                    {selectedProjectName && selectedEntries.length > 1 && (
+                                        <div className="form-group">
+                                            <label className="form-label">Profile trong dự án</label>
+                                            <select
+                                                className="form-input"
+                                                value={selectedProfileIdx}
+                                                onChange={(e) => setSelectedProfileIdx(Number(e.target.value))}
+                                            >
+                                                {selectedEntries.map((entry, idx) => (
+                                                    <option key={idx} value={idx}>{entry.profile.name} (Tier: {entry.profile.tier || 'N/A'})</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    )}
+
+                                    {selectedProfile && (
+                                        <div style={{ padding: '8px 12px', background: 'var(--bg-secondary)', borderRadius: '6px', fontSize: '0.82rem', marginBottom: '12px' }}>
+                                            <div><strong>Profile:</strong> {selectedProfile.name}</div>
+                                            <div><strong>Project ID:</strong> <code>{selectedProjectObj?.projectId || '(chưa có)'}</code></div>
+                                        </div>
+                                    )}
+
+                                    <div className="form-group">
+                                        <label className="form-label">Entity Name *</label>
+                                        <input
+                                            type="text"
+                                            className="form-input"
+                                            placeholder="e.g., Hero Warrior"
+                                            value={name}
+                                            onChange={(e) => setName(e.target.value)}
+                                        />
+                                    </div>
+
+                                    <div className="form-group">
+                                        <label className="form-label">Description</label>
+                                        <textarea
+                                            className="form-input"
+                                            rows={2}
+                                            placeholder="A brave knight in silver armor with a crimson cape..."
+                                            value={description}
+                                            onChange={(e) => setDescription(e.target.value)}
+                                            style={{ resize: 'vertical' }}
+                                        />
+                                    </div>
+
+                                    <div className="form-group">
+                                        <label className="form-label">Entity Type</label>
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                                            {ENTITY_TYPES.map(type => (
+                                                <div
+                                                    key={type.value}
+                                                    onClick={() => setEntityType(type.value)}
+                                                    style={{
+                                                        padding: '8px 6px',
+                                                        borderRadius: '8px',
+                                                        background: entityType === type.value ? 'var(--primary-color)' : 'var(--bg-secondary)',
+                                                        color: entityType === type.value ? 'white' : 'var(--text)',
+                                                        cursor: 'pointer',
+                                                        textAlign: 'center',
+                                                        transition: 'all 0.2s',
+                                                        border: entityType === type.value ? '2px solid var(--primary-color)' : '2px solid transparent',
+                                                    }}
+                                                >
+                                                    <div style={{ fontSize: '1rem' }}>{type.icon}</div>
+                                                    <div style={{ fontSize: '0.7rem' }}>{type.label}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <div className="form-group">
+                                        <label className="form-label">Model</label>
+                                        <select
+                                            className="form-input"
+                                            value={modelKey}
+                                            onChange={(e) => setModelKey(e.target.value)}
+                                        >
+                                            <option value="NANO_BANANA_PRO">NANO_BANANA_PRO</option>
+                                            <option value="NANO_BANANA_2">NANO_BANANA_2</option>
+                                            <option value="IMAGEN_4">IMAGEN_4</option>
+                                        </select>
+                                    </div>
+
+                                    <div className="form-group">
+                                        <label className="form-label">Tỷ lệ khung hình</label>
+                                        <select
+                                            className="form-input"
+                                            value={aspectRatio}
+                                            onChange={(e) => setAspectRatio(e.target.value)}
+                                        >
+                                            <option value="IMAGE_ASPECT_RATIO_LANDSCAPE">16:9 Ngang (Landscape)</option>
+                                            <option value="IMAGE_ASPECT_RATIO_PORTRAIT">9:16 Dọc (Portrait)</option>
+                                            <option value="IMAGE_ASPECT_RATIO_SQUARE">1:1 Vuông (Square)</option>
+                                            <option value="IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE">4:3 Ngang (Classic)</option>
+                                            <option value="IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR">3:4 Dọc (Portrait 3:4)</option>
+                                        </select>
+                                    </div>
+
+                                    {selectedProfile && (
+                                        <div style={{ padding: '10px 12px', background: selectedProfile.tier === 'PAYGATE_TIER_TWO' ? 'rgba(255, 215, 0, 0.1)' : 'rgba(59, 130, 246, 0.1)', borderRadius: '6px', fontWeight: 600, color: selectedProfile.tier === 'PAYGATE_TIER_TWO' ? '#ffd700' : '#3b82f6' }}>
+                                            Tier: {selectedProfile.tier === 'PAYGATE_TIER_TWO' ? '👑 Ultra' : '⭐ Pro'}
+                                            <span style={{ marginLeft: '8px', fontSize: '0.8rem', opacity: 0.7 }}>({selectedProfile.tier})</span>
+                                        </div>
+                                    )}
+
+                                    <div className="form-group">
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                            <label className="form-label" style={{ margin: 0 }}>Material Style</label>
+                                            <button
+                                                className="btn btn-ghost"
+                                                style={{ fontSize: '0.75rem', padding: '2px 8px' }}
+                                                onClick={openAddMaterial}
+                                            >
+                                                + Add
+                                            </button>
+                                        </div>
+                                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginTop: '8px' }}>
+                                            {materials.map(mat => (
+                                                <div key={mat.id} style={{ position: 'relative' }}>
+                                                    <div
+                                                        onClick={() => setMaterialId(mat.id)}
+                                                        style={{
+                                                            padding: '6px 12px',
+                                                            borderRadius: '16px',
+                                                            background: materialId === mat.id ? mat.color : 'var(--bg-secondary)',
+                                                            color: materialId === mat.id ? 'white' : 'var(--text)',
+                                                            cursor: 'pointer',
+                                                            fontSize: '0.8rem',
+                                                            transition: 'all 0.2s',
+                                                            border: materialId === mat.id ? '2px solid ' + mat.color : '2px solid transparent',
+                                                        }}
+                                                    >
+                                                        {mat.label}
+                                                    </div>
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); openEditMaterial(mat); }}
+                                                        style={{
+                                                            position: 'absolute',
+                                                            top: '-4px',
+                                                            right: '-4px',
+                                                            width: '16px',
+                                                            height: '16px',
+                                                            borderRadius: '50%',
+                                                            background: 'var(--text-secondary)',
+                                                            color: 'white',
+                                                            border: 'none',
+                                                            cursor: 'pointer',
+                                                            fontSize: '10px',
+                                                            lineHeight: '16px',
+                                                            textAlign: 'center',
+                                                            padding: 0,
+                                                        }}
+                                                        title="Edit material"
+                                                    >✎</button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    <button
+                                        className="btn btn-primary"
+                                        onClick={handleGenerate}
+                                        disabled={!selectedProfile || !name.trim() || generating}
+                                        style={{ width: '100%', marginTop: '8px' }}
+                                    >
+                                        {generating ? '⏳ Đang tạo...' : '✨ Tạo Entity'}
+                                    </button>
+
+                                    {/* Error display with retry */}
+                                    {error && (
+                                        <div style={{
+                                            marginTop: '12px',
+                                            padding: '12px',
+                                            background: 'rgba(239, 68, 68, 0.1)',
+                                            borderRadius: '8px',
+                                            border: '1px solid rgba(239, 68, 68, 0.3)'
+                                        }}>
+                                            <div style={{ color: 'var(--error)', fontSize: '0.9rem', marginBottom: '8px' }}>
+                                                {error.includes('403') ? '⚠️ Lỗi Captcha - Google yêu cầu xác minh' : `❌ ${error}`}
+                                            </div>
+                                            <button
+                                                className="btn btn-secondary"
+                                                onClick={handleGenerate}
+                                                style={{ width: '100%' }}
+                                            >
+                                                🔄 Thử lại
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* Preview result with retry */}
+                                    {lastResult && !generating && (
+                                        <div style={{ marginTop: '16px', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
+                                            <div style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '8px', color: 'var(--success)' }}>
+                                                ✓ Đã tạo: {lastResult.name}
+                                            </div>
+                                            {lastResult.localPath ? (
+                                                <img
+                                                    src={`/data/entity-references/${selectedProfile?.id}/${getFileName(lastResult.localPath)}`}
+                                                    alt={lastResult.name}
+                                                    style={{ width: '100%', borderRadius: '8px' }}
+                                                    onClick={() => onOpenLightbox?.(`/data/entity-references/${selectedProfile?.id}/${getFileName(lastResult.localPath)}`, lastResult.name)}
+                                                />
+                                            ) : lastResult.remoteUrl ? (
+                                                <img
+                                                    src={lastResult.remoteUrl}
+                                                    alt={lastResult.name}
+                                                    style={{ width: '100%', borderRadius: '8px' }}
+                                                    onClick={() => onOpenLightbox?.(lastResult.remoteUrl, lastResult.name)}
+                                                />
+                                            ) : (
+                                                <div style={{ textAlign: 'center', padding: '20px', color: 'var(--text-secondary)' }}>
+                                                    Đang tải ảnh...
+                                                </div>
+                                            )}
+                                            <button
+                                                className="btn btn-secondary"
+                                                onClick={handleGenerate}
+                                                style={{ width: '100%', marginTop: '8px' }}
+                                            >
+                                                🔄 Tạo lại ảnh này
+                                            </button>
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Right: Entity Gallery */}
+                    <div>
+                        <div style={{ display: 'flex', gap: '8px', marginBottom: '16px', flexWrap: 'wrap' }}>
+                            <div
+                                onClick={() => setFilter('all')}
+                                style={{
+                                    padding: '8px 16px',
+                                    borderRadius: '20px',
+                                    background: filter === 'all' ? 'var(--primary-color)' : 'var(--bg-secondary)',
+                                    color: filter === 'all' ? 'white' : 'var(--text)',
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                All ({entities.length})
+                            </div>
+                            {ENTITY_TYPES.map(type => {
+                                const count = entities.filter(e => e.entityType === type.value).length;
+                                return (
+                                    <div
+                                        key={type.value}
+                                        onClick={() => setFilter(type.value)}
+                                        style={{
+                                            padding: '8px 16px',
+                                            borderRadius: '20px',
+                                            background: filter === type.value ? 'var(--primary-color)' : 'var(--bg-secondary)',
+                                            color: filter === type.value ? 'white' : 'var(--text)',
+                                            cursor: 'pointer',
+                                        }}
+                                    >
+                                        {type.icon} {type.label} ({count})
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {loading ? (
+                            <div className="loading-spinner">Loading...</div>
+                        ) : filteredEntities.length === 0 ? (
+                            <div className="empty-state">
+                                <div style={{ fontSize: '3rem' }}>🎭</div>
+                                <p>No entities yet</p>
+                                <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                    Generate your first entity reference image!
+                                </p>
+                            </div>
+                        ) : (
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '16px' }}>
+                                {filteredEntities.map(entity => (
+                                    <div key={entity.id} className="profile-card" style={{ overflow: 'hidden' }}>
+                                        <div style={{ position: 'relative', paddingTop: '100%', background: 'var(--bg-secondary)', cursor: 'pointer' }}>
+                                            {entity.localPath ? (
+                                                <img
+                                                    src={`/data/entity-references/${entity.profileId}/${getFileName(entity.localPath)}`}
+                                                    alt={entity.name}
+                                                    style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+                                                    onClick={() => onOpenLightbox?.(`/data/entity-references/${entity.profileId}/${getFileName(entity.localPath)}`, entity.name)}
+                                                />
+                                            ) : entity.remoteUrl ? (
+                                                <img
+                                                    src={entity.remoteUrl}
+                                                    alt={entity.name}
+                                                    style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover' }}
+                                                    onClick={() => onOpenLightbox?.(entity.remoteUrl, entity.name)}
+                                                />
+                                            ) : (
+                                                <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', fontSize: '3rem' }}>
+                                                    {getEntityIcon(entity.entityType)}
+                                                </div>
+                                            )}
+                                            <div style={{
+                                                position: 'absolute',
+                                                top: '8px',
+                                                left: '8px',
+                                                background: getMaterialColor(entity.materialId),
+                                                color: 'white',
+                                                padding: '2px 8px',
+                                                borderRadius: '10px',
+                                                fontSize: '0.7rem',
+                                                fontWeight: 600,
+                                            }}>
+                                                {getMaterialLabel(entity.materialId)}
+                                            </div>
+                                            <div style={{
+                                                position: 'absolute',
+                                                top: '8px',
+                                                right: '8px',
+                                                background: 'rgba(0,0,0,0.7)',
+                                                padding: '4px 8px',
+                                                borderRadius: '4px',
+                                                fontSize: '1rem',
+                                            }}>
+                                                {getEntityIcon(entity.entityType)}
+                                            </div>
+                                        </div>
+                                        <div style={{ padding: '12px' }}>
+                                            <div style={{ fontWeight: 600, marginBottom: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                {entity.name}
+                                            </div>
+                                            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                                {new Date(entity.createdAt).toLocaleDateString()}
+                                            </div>
+                                            <button
+                                                className="btn btn-ghost"
+                                                onClick={() => handleDelete(entity.id)}
+                                                style={{ width: '100%', fontSize: '0.85rem', padding: '6px' }}
+                                            >
+                                                🗑️ Delete
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+
+            {/* Material Style Editor Modal */}
+            {showMaterialEditor && (
+                <div className="modal-overlay active" onClick={(e) => e.target === e.currentTarget && setShowMaterialEditor(false)}>
+                    <div className="modal" style={{ maxWidth: '700px', maxHeight: '90vh', overflowY: 'auto' }}>
+                        <div className="modal-header">
+                            <h3>{editingMaterial ? '✏️ Edit Material Style' : '➕ Add Material Style'}</h3>
+                            <button className="modal-close" onClick={() => setShowMaterialEditor(false)}>×</button>
+                        </div>
+                        <div className="modal-body">
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                                <div className="form-group">
+                                    <label className="form-label">ID *</label>
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        placeholder="e.g., my_custom_style"
+                                        value={materialForm.id}
+                                        onChange={(e) => setMaterialForm(f => ({ ...f, id: e.target.value.toLowerCase().replace(/\s+/g, '_') }))}
+                                        disabled={!!editingMaterial}
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Label *</label>
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        placeholder="e.g., My Custom Style"
+                                        value={materialForm.label}
+                                        onChange={(e) => setMaterialForm(f => ({ ...f, label: e.target.value }))}
+                                    />
+                                </div>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Color</label>
+                                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                    <input
+                                        type="color"
+                                        value={materialForm.color}
+                                        onChange={(e) => setMaterialForm(f => ({ ...f, color: e.target.value }))}
+                                        style={{ width: '40px', height: '36px', padding: '2px', borderRadius: '6px', border: '1px solid var(--border)', cursor: 'pointer' }}
+                                    />
+                                    <input
+                                        type="text"
+                                        className="form-input"
+                                        value={materialForm.color}
+                                        onChange={(e) => setMaterialForm(f => ({ ...f, color: e.target.value }))}
+                                        style={{ flex: 1 }}
+                                    />
+                                </div>
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Style Instruction (prompt chính)</label>
+                                <textarea
+                                    className="form-input"
+                                    rows={3}
+                                    placeholder="3D animated style, Pixar-quality rendering..."
+                                    value={materialForm.style_instruction}
+                                    onChange={(e) => setMaterialForm(f => ({ ...f, style_instruction: e.target.value }))}
+                                    style={{ resize: 'vertical' }}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Negative Prompt (tránh)</label>
+                                <textarea
+                                    className="form-input"
+                                    rows={2}
+                                    placeholder="NOT photorealistic, NOT 3D render..."
+                                    value={materialForm.negative_prompt}
+                                    onChange={(e) => setMaterialForm(f => ({ ...f, negative_prompt: e.target.value }))}
+                                    style={{ resize: 'vertical' }}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Scene Prefix</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    placeholder="3D animated Pixar-quality rendering..."
+                                    value={materialForm.scene_prefix}
+                                    onChange={(e) => setMaterialForm(f => ({ ...f, scene_prefix: e.target.value }))}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Lighting</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    placeholder="Studio lighting, global illumination..."
+                                    value={materialForm.lighting}
+                                    onChange={(e) => setMaterialForm(f => ({ ...f, lighting: e.target.value }))}
+                                />
+                            </div>
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+                                <button className="btn btn-primary" onClick={saveMaterial} style={{ flex: 1 }}>
+                                    💾 Save
+                                </button>
+                                {editingMaterial && (
+                                    <>
+                                        <button className="btn btn-ghost" onClick={() => deleteMaterial(editingMaterial.id)} style={{ color: 'var(--error)' }}>
+                                            🗑️ Delete
+                                        </button>
+                                        <button className="btn btn-ghost" onClick={() => setShowMaterialEditor(false)}>
+                                            Cancel
+                                        </button>
+                                    </>
+                                )}
+                                {!editingMaterial && (
+                                    <button className="btn btn-ghost" onClick={() => setShowMaterialEditor(false)}>
+                                        Cancel
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </>
+    );
+}
+
 // About Tab
 function AboutTab({ cloakStatus }: { cloakStatus: { ready: boolean; available: boolean } }) {
     return (
@@ -645,12 +1416,18 @@ function FlowProjectCard({ project, profile }: FlowProjectCardProps) {
 }
 
 // Flow Projects Tab
-function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profile[]; onCreateProjectsBatch: (data: { profileIds: string[]; name: string; description?: string; toolName?: string }) => Promise<any> }) {
+function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetadata }: {
+    profiles: Profile[];
+    onCreateProjectsBatch: (data: { profileIds: string[]; name: string; description?: string; toolName?: string }) => Promise<any>;
+    onUpdateProfileMetadata: (profileId: string, metadata: Record<string, any>) => Promise<any>;
+}) {
     const [showModal, setShowModal] = useState(false);
     const [projectName, setProjectName] = useState('');
+    const [projectDescription, setProjectDescription] = useState('');
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [creating, setCreating] = useState(false);
     const [results, setResults] = useState<any[] | null>(null);
+    const [, setRefreshKey] = useState(0); // Force re-render
 
     // Derive flow projects from profile metadata
     const allProjects: FlowProject[] = profiles.flatMap((profile) => {
@@ -662,6 +1439,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
             items.push({
                 id: raw.projectId || `${profile.id}-${idx}`,
                 profileId: profile.id,
+                profileName: profile.name,
                 name: raw.name,
                 description: raw.description,
                 toolName: raw.toolName,
@@ -671,6 +1449,26 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
         });
         return items;
     });
+
+    // Group projects by name only (each profile has its own projectId)
+    const groupedProjects = allProjects.reduce((acc, project) => {
+        const key = project.name;
+        if (!acc[key]) {
+            acc[key] = {
+                name: project.name,
+                description: project.description,
+                profiles: [],
+            };
+        }
+        acc[key].profiles.push({
+            profileId: project.profileId,
+            profileName: project.profileName,
+            projectId: project.projectId,
+        });
+        return acc;
+    }, {} as Record<string, { name: string; description?: string; profiles: { profileId: string; profileName: string; projectId?: string }[] }>);
+
+    const groupedProjectsList = Object.values(groupedProjects);
 
     const profileMap = new Map(profiles.map((profile) => [profile.id, profile]));
 
@@ -695,6 +1493,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
             const response = await onCreateProjectsBatch({
                 profileIds: Array.from(selectedIds),
                 name: projectName.trim(),
+                description: projectDescription.trim() || undefined,
                 toolName: 'PINHOLE',
             });
             const data = Array.isArray(response?.data) ? response.data : [];
@@ -705,9 +1504,24 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                 error: item.error,
             }));
             setResults(normalized);
-            if (normalized.some((item: any) => item.status === 'success')) {
-                window.dispatchEvent(new CustomEvent('refresh-profiles'));
+
+            // Check if all succeeded
+            const allSuccess = normalized.every((item: any) => item.status === 'success');
+            if (allSuccess) {
+                // Close modal and show success notification
+                setTimeout(() => {
+                    resetAndClose();
+                    window.dispatchEvent(new CustomEvent('show-notification', {
+                        detail: { message: `Đã tạo project "${projectName.trim()}" trên ${normalized.length} profile!`, type: 'success' }
+                    }));
+                }, 800);
             }
+
+            // Refresh immediately to show new projects
+            setRefreshKey(k => k + 1);
+            setTimeout(() => {
+                window.dispatchEvent(new CustomEvent('refresh-profiles'));
+            }, 500);
         } catch (err) {
             setResults([
                 {
@@ -725,6 +1539,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
     const resetAndClose = () => {
         setShowModal(false);
         setProjectName('');
+        setProjectDescription('');
         setSelectedIds(new Set());
         setResults(null);
     };
@@ -749,7 +1564,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                         <h3>Chưa có profile nào</h3>
                         <p>Hãy tạo profile trước, rồi quay lại đây để tạo project trên Flow.</p>
                     </div>
-                ) : allProjects.length === 0 ? (
+                ) : groupedProjectsList.length === 0 ? (
                     <div className="empty-state">
                         <div className="empty-icon">🌊</div>
                         <h3>Chưa có Flow Project nào</h3>
@@ -757,13 +1572,44 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                         <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Tạo Project Đầu Tiên</button>
                     </div>
                 ) : (
-                    <div className="profiles-grid">
-                        {allProjects.map((project) => (
-                            <FlowProjectCard
-                                key={`${project.profileId}-${project.id}`}
-                                project={project}
-                                profile={profileMap.get(project.profileId)}
-                            />
+                    <div className="flow-projects-grouped">
+                        {groupedProjectsList.map((group) => (
+                            <div key={`${group.name}-${group.projectId}`} className="flow-project-group-card">
+                                <div className="flow-project-group-header">
+                                    <h3 className="flow-project-group-name">{group.name}</h3>
+                                    <button
+                                        className="btn btn-ghost btn-sm"
+                                        onClick={() => {
+                                            if (confirm(`Xóa dự án "${group.name}" khỏi tất cả profiles?`)) {
+                                                group.profiles.forEach(p => {
+                                                    const profile = profiles.find(pr => pr.id === p.profileId);
+                                                    if (profile) {
+                                                        const metadata = { ...profile.metadata } || {};
+                                                        metadata.flowProjects = (metadata.flowProjects || []).filter(
+                                                            (proj: any) => proj.name !== group.name
+                                                        );
+                                                        onUpdateProfileMetadata(profile.id, metadata);
+                                                    }
+                                                });
+                                            }
+                                        }}
+                                        title="Xóa dự án"
+                                    >
+                                        🗑️
+                                    </button>
+                                </div>
+                                {group.description && (
+                                    <p className="flow-project-group-desc">{group.description}</p>
+                                )}
+                                <div className="flow-project-group-profiles">
+                                    {group.profiles.map((p) => (
+                                        <div key={p.profileId} className="profile-project-row">
+                                            <span className="profile-name">{p.profileName}</span>
+                                            <span className="profile-project-id">{p.projectId || '—'}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
                         ))}
                     </div>
                 )}
@@ -786,6 +1632,17 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
                                     value={projectName}
                                     onChange={(e) => setProjectName(e.target.value)}
                                     autoFocus
+                                />
+                            </div>
+
+                            <div className="form-group">
+                                <label className="form-label">Mô tả (tùy chọn)</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    placeholder="VD: Quảng cáo sản phẩm A"
+                                    value={projectDescription}
+                                    onChange={(e) => setProjectDescription(e.target.value)}
                                 />
                             </div>
 
@@ -890,13 +1747,406 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch }: { profiles: Profil
     );
 }
 
+// Flow Images Tab
+function FlowImagesTab({
+    profiles,
+    onGenerateImage,
+    generating,
+    lastResult,
+    error,
+    onClearResult,
+    onOpenProfile,
+    onWaitForProfileReady,
+}: {
+    profiles: Profile[];
+    onGenerateImage: (data: {
+        profileId: string;
+        prompt: string;
+        projectId?: string;
+        modelKey?: string;
+        aspectRatio?: string;
+        userPaygateTier?: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+    }) => Promise<GeneratedImageResult | void>;
+    generating: boolean;
+    lastResult: GeneratedImageResult | null;
+    error: string | null;
+    onClearResult: () => void;
+    onOpenProfile?: (profileId: string) => Promise<void>;
+    onWaitForProfileReady?: (profileId: string, timeoutMs?: number) => Promise<void>;
+}) {
+    // Cascading: first select project, then select which profile/project-instance to use
+    const [selectedProjectName, setSelectedProjectName] = useState<string>('');
+    const [selectedProfileIdx, setSelectedProfileIdx] = useState<number>(0);
+    const [prompt, setPrompt] = useState('');
+    const [modelKey, setModelKey] = useState('NANO_BANANA_PRO');
+    const [aspectRatio, setAspectRatio] = useState('IMAGE_ASPECT_RATIO_LANDSCAPE');
+    const [submitting, setSubmitting] = useState(false);
+    // Store last successful params for retry
+    const [lastParams, setLastParams] = useState<{
+        prompt: string;
+        modelKey: string;
+        aspectRatio: string;
+        profileId: string;
+        projectId?: string;
+    } | null>(null);
+
+    // Group profiles by project name
+    type ProjectEntry = { profile: Profile; projectIdx: number; projectName: string };
+    const projectGroups: Record<string, ProjectEntry[]> = {};
+    profiles.forEach((profile) => {
+        const flowProjects: any[] = (profile.metadata as any)?.flowProjects || [];
+        flowProjects.forEach((proj: any, idx: number) => {
+            const name = proj.name || `Project ${idx + 1}`;
+            if (!projectGroups[name]) projectGroups[name] = [];
+            projectGroups[name].push({ profile, projectIdx: idx, projectName: name });
+        });
+    });
+
+    const projectNames = Object.keys(projectGroups).sort();
+    const selectedEntries = projectGroups[selectedProjectName] || [];
+    const selectedEntry = selectedEntries[selectedProfileIdx];
+    const selectedProfile = selectedEntry?.profile;
+    const selectedProjectIdx = selectedEntry?.projectIdx ?? 0;
+    const selectedProjectObj = selectedProfile ? (selectedProfile.metadata as any)?.flowProjects?.[selectedProjectIdx] : null;
+    const tier = selectedProfile?.tier || 'PAYGATE_TIER_TWO';
+
+    const handleSubmit = async () => {
+        if (!selectedProfile || !prompt.trim() || submitting) return;
+
+        setSubmitting(true);
+        try {
+            // Auto-open profile if not already running and wait for it to be ready
+            if (selectedProfile.status !== 'running') {
+                if (onOpenProfile) {
+                    try {
+                        await onOpenProfile(selectedProfile.id);
+                    } catch (e) {
+                        console.warn('Could not auto-open profile:', e);
+                    }
+                }
+            }
+
+            // Wait for profile to be ready (extension connected, flowKey captured)
+            if (onWaitForProfileReady) {
+                try {
+                    await onWaitForProfileReady(selectedProfile.id, 30000);
+                } catch (e) {
+                    console.warn('Profile may not be fully ready:', e);
+                }
+            }
+
+            await onGenerateImage({
+                profileId: selectedProfile.id,
+                prompt: prompt.trim(),
+                projectId: selectedProjectObj?.projectId,
+                modelKey,
+                aspectRatio,
+            });
+            // Store successful params for retry
+            setLastParams({
+                prompt: prompt.trim(),
+                modelKey,
+                aspectRatio,
+                profileId: selectedProfile.id,
+                projectId: selectedProjectObj?.projectId,
+            });
+        } catch {
+            // error is surfaced via `error` prop
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    // Auto-select first project if none selected
+    useEffect(() => {
+        if (!selectedProjectName && projectNames.length > 0) {
+            setSelectedProjectName(projectNames[0]);
+            setSelectedProfileIdx(0);
+        }
+    }, [projectNames, selectedProjectName]);
+
+    const canSubmit = !!selectedProfile && !!prompt.trim() && !submitting && !generating;
+
+    return (
+        <>
+            <div className="content-header">
+                <div className="header-left">
+                    <h2><span>🖼️</span> Flow Images</h2>
+                </div>
+                <div className="header-actions">
+                    <button className="btn btn-ghost" onClick={onClearResult}>🗑️ Xoá kết quả</button>
+                </div>
+            </div>
+            <div className="content-body">
+                {projectNames.length === 0 ? (
+                    <div className="empty-state">
+                        <div className="empty-icon">🌊</div>
+                        <h3>Chưa có Project nào</h3>
+                        <p>Hãy tạo ít nhất một Project trong tab "Flow Projects" trước khi tạo ảnh.</p>
+                    </div>
+                ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+                        <div className="profile-card">
+                            <div className="profile-header">
+                                <div className="profile-title">
+                                    <div className="profile-avatar">🎛️</div>
+                                    <div>
+                                        <div className="profile-name">Tạo ảnh mới</div>
+                                        <div className="profile-id">Chọn Project rồi chọn Profile</div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="profile-meta" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                                {/* Cascading: Project → Profile */}
+                                <div className="form-group">
+                                    <label className="form-label">Project</label>
+                                    <select
+                                        className="form-input"
+                                        value={selectedProjectName}
+                                        onChange={(e) => {
+                                            setSelectedProjectName(e.target.value);
+                                            setSelectedProfileIdx(0);
+                                        }}
+                                    >
+                                        <option value="">-- Chọn project --</option>
+                                        {projectNames.map((name) => (
+                                            <option key={name} value={name}>{name} ({projectGroups[name].length} profile)</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {selectedProjectName && selectedEntries.length > 1 && (
+                                    <div className="form-group">
+                                        <label className="form-label">Profile trong dự án</label>
+                                        <select
+                                            className="form-input"
+                                            value={selectedProfileIdx}
+                                            onChange={(e) => setSelectedProfileIdx(Number(e.target.value))}
+                                        >
+                                            {selectedEntries.map((entry, idx) => (
+                                                <option key={idx} value={idx}>
+                                                    {entry.profile.name} (Tier: {entry.profile.tier || 'N/A'})
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
+
+                                {selectedProfile && (
+                                    <div style={{ padding: '10px 12px', background: 'var(--bg-secondary)', borderRadius: '8px', fontSize: '0.85rem' }}>
+                                        <div><strong>Profile:</strong> {selectedProfile.name}</div>
+                                        <div><strong>Tier:</strong> {tier}</div>
+                                        <div><strong>Project ID:</strong> <code>{selectedProjectObj?.projectId || '(chưa có)'}</code></div>
+                                    </div>
+                                )}
+
+                                <div className="form-group">
+                                    <label className="form-label">Prompt</label>
+                                    <textarea
+                                        className="form-input"
+                                        rows={3}
+                                        placeholder="Mô tả ảnh bạn muốn tạo..."
+                                        value={prompt}
+                                        onChange={(e) => setPrompt(e.target.value)}
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Model</label>
+                                    <select
+                                        className="form-input"
+                                        value={modelKey}
+                                        onChange={(e) => setModelKey(e.target.value)}
+                                    >
+                                        <option value="NANO_BANANA_PRO">NANO_BANANA_PRO</option>
+                                        <option value="NANO_BANANA_2">NANO_BANANA_2</option>
+                                        <option value="IMAGEN_4">IMAGEN_4</option>
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Tỷ lệ khung hình</label>
+                                    <select
+                                        className="form-input"
+                                        value={aspectRatio}
+                                        onChange={(e) => setAspectRatio(e.target.value)}
+                                    >
+                                        <option value="IMAGE_ASPECT_RATIO_LANDSCAPE">16:9 Ngang (Landscape)</option>
+                                        <option value="IMAGE_ASPECT_RATIO_PORTRAIT">9:16 Dọc (Portrait)</option>
+                                        <option value="IMAGE_ASPECT_RATIO_SQUARE">1:1 Vuông (Square)</option>
+                                        <option value="IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE">4:3 Ngang (Classic)</option>
+                                        <option value="IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR">3:4 Dọc (Portrait 3:4)</option>
+                                    </select>
+                                </div>
+                                <div className="form-group">
+                                    <label className="form-label">Tier</label>
+                                    <div style={{
+                                        padding: '10px 12px',
+                                        background: tier === 'PAYGATE_TIER_TWO' ? 'rgba(255, 215, 0, 0.1)' : 'rgba(59, 130, 246, 0.1)',
+                                        borderRadius: '6px',
+                                        fontWeight: 600,
+                                        color: tier === 'PAYGATE_TIER_TWO' ? '#ffd700' : '#3b82f6'
+                                    }}>
+                                        {tier === 'PAYGATE_TIER_TWO' ? '👑 Ultra' : '⭐ Pro'}
+                                        <span style={{ marginLeft: '8px', fontSize: '0.8rem', opacity: 0.7 }}>({tier})</span>
+                                    </div>
+                                </div>
+                                <button
+                                    className="btn btn-primary"
+                                    onClick={handleSubmit}
+                                    disabled={!canSubmit}
+                                >
+                                    {generating || submitting ? 'Đang tạo ảnh...' : 'Tạo ảnh'}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="profile-card">
+                            <div className="profile-header">
+                                <div className="profile-title">
+                                    <div className="profile-avatar">🖼️</div>
+                                    <div>
+                                        <div className="profile-name">Kết quả</div>
+                                        <div className="profile-id">
+                                            {lastResult ? 'Đã tạo xong' : 'Chưa có ảnh nào được tạo'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="profile-meta" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                                {generating || submitting ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '40px', gap: '16px' }}>
+                                        <div className="loading-spinner" style={{ width: 60, height: 60, border: '4px solid var(--border)', borderTopColor: 'var(--primary-color)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                                        <div style={{ color: 'var(--text-secondary)' }}>Đang tạo ảnh...</div>
+                                    </div>
+                                ) : error ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                                        <div style={{
+                                            padding: '16px',
+                                            background: 'rgba(239, 68, 68, 0.1)',
+                                            borderRadius: '8px',
+                                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                                            color: 'var(--error)',
+                                            fontSize: '0.9rem'
+                                        }}>
+                                            <div style={{ fontWeight: 600, marginBottom: '8px' }}>
+                                                {error.includes('403') ? '⚠️ Lỗi Captcha' : '❌ Lỗi tạo ảnh'}
+                                            </div>
+                                            <div>{error.includes('403') ? 'Google yêu cầu xác minh captcha. Vui lòng thử lại.' : error}</div>
+                                        </div>
+                                        {lastParams && (
+                                            <button
+                                                className="btn btn-primary"
+                                                onClick={() => {
+                                                    // Restore params and retry
+                                                    setPrompt(lastParams.prompt);
+                                                    setModelKey(lastParams.modelKey);
+                                                    setAspectRatio(lastParams.aspectRatio);
+                                                    handleSubmit();
+                                                }}
+                                            >
+                                                🔄 Tạo lại
+                                            </button>
+                                        )}
+                                    </div>
+                                ) : lastResult ? (
+                                    <>
+                                        <div style={{ fontSize: '0.9rem' }}>
+                                            <strong>Model:</strong> {lastResult.modelKey}
+                                        </div>
+                                        <div style={{ fontSize: '0.9rem' }}>
+                                            <strong>Project:</strong> <code style={{ fontSize: '0.8rem' }}>{lastResult.projectId}</code>
+                                        </div>
+                                        <div style={{ fontSize: '0.9rem' }}>
+                                            <strong>Tier:</strong> {lastResult.userPaygateTier}
+                                        </div>
+                                        {lastResult.mediaId && (
+                                            <div style={{ fontSize: '0.85rem', background: 'var(--bg-secondary)', padding: '8px', borderRadius: '6px' }}>
+                                                <strong>Media ID:</strong> <code style={{ fontSize: '0.75rem' }}>{lastResult.mediaId}</code>
+                                            </div>
+                                        )}
+                                        {lastResult.localPath ? (
+                                            <div style={{ marginTop: '8px' }}>
+                                                <div style={{ fontSize: '0.85rem', color: 'var(--success)', marginBottom: '8px' }}>
+                                                    ✓ Đã tải ảnh về local
+                                                </div>
+                                                <img
+                                                    src={`/data/entity-references/${lastParams?.profileId}/${getFileName(lastResult.localPath)}`}
+                                                    alt="Generated image"
+                                                    style={{ maxWidth: '100%', borderRadius: '12px', border: '1px solid var(--border)' }}
+                                                    onError={(e) => {
+                                                        e.currentTarget.style.display = 'none';
+                                                    }}
+                                                />
+                                            </div>
+                                        ) : lastResult.servingUri || lastResult.downloadUrl ? (
+                                            <div style={{ marginTop: '8px' }}>
+                                                <img
+                                                    src={lastResult.servingUri || lastResult.downloadUrl || ''}
+                                                    alt="Generated image"
+                                                    style={{ maxWidth: '100%', borderRadius: '12px', border: '1px solid var(--border)' }}
+                                                    onError={(e) => {
+                                                        e.currentTarget.style.display = 'none';
+                                                        e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                                                    }}
+                                                />
+                                                <div className="hidden" style={{ display: 'none', padding: '16px', background: 'var(--bg-secondary)', borderRadius: '8px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                                                    <p style={{ marginBottom: '8px' }}>URL ảnh có thể đã hết hạn</p>
+                                                    <p style={{ fontSize: '0.85rem' }}>Media ID: <code>{lastResult.mediaId}</code></p>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
+                                                <p>Chưa nhận được URL ảnh.</p>
+                                                {lastResult.mediaId && (
+                                                    <p style={{ marginTop: '8px' }}>Media ID: <code>{lastResult.mediaId}</code></p>
+                                                )}
+                                            </div>
+                                        )}
+                                        <details style={{ marginTop: '8px' }}>
+                                            <summary style={{ cursor: 'pointer', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                                                Raw result ({Object.keys(lastResult.rawResult || {}).length} keys)
+                                            </summary>
+                                            <pre style={{ fontSize: '0.7rem', marginTop: '8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '300px', overflow: 'auto', background: 'var(--bg-secondary)', padding: '12px', borderRadius: '6px' }}>
+                                                {JSON.stringify(lastResult.rawResult, null, 2)}
+                                            </pre>
+                                        </details>
+                                        {lastParams && (
+                                            <button
+                                                className="btn btn-secondary"
+                                                onClick={() => {
+                                                    setPrompt(lastParams.prompt);
+                                                    setModelKey(lastParams.modelKey);
+                                                    setAspectRatio(lastParams.aspectRatio);
+                                                    handleSubmit();
+                                                }}
+                                                style={{ marginTop: '12px' }}
+                                            >
+                                                🔄 Tạo lại ảnh này
+                                            </button>
+                                        )}
+                                    </>
+                                ) : (
+                                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
+                                        Nhập prompt và chọn project để bắt đầu tạo ảnh.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </>
+    );
+}
+
 // Main App
 export default function App() {
     const [activeTab, setActiveTab] = useState('profiles');
     const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+    const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
 
     const { profiles, loading, creating: creatingProfile, loadProfiles, createProfile, updateProfile, deleteProfile, openProfile, closeProfile, saveSession, refreshTier, setProxy, createFlowProjectsBatch, waitForProfileReady } = useProfiles();
     const { status: cloakStatus } = useCloakBrowser();
+    const { generating: generatingImage, lastResult: lastGeneratedImage, error: imageError, generateImage, reset: resetGeneratedImage } = useFlowImages();
     useWebSocket();
 
     const showNotification = useCallback((message: string, type: 'success' | 'error' | 'info') => {
@@ -983,6 +2233,15 @@ export default function App() {
         }
     };
 
+    const handleUpdateProfileMetadata = async (profileId: string, metadata: Record<string, any>) => {
+        try {
+            await api.updateProfileMetadata(profileId, metadata);
+            await loadProfiles();
+        } catch (e) {
+            showNotification(e instanceof Error ? e.message : 'Lỗi khi cập nhật', 'error');
+        }
+    };
+
     const handleDeleteProfile = async (id: string) => {
         if (!confirm('Bạn có chắc muốn xóa profile này?')) return;
         try {
@@ -1000,9 +2259,17 @@ export default function App() {
     // Listen for refresh events
     useEffect(() => {
         const handleRefresh = () => loadProfiles();
+        const handleShowNotification = (e: Event) => {
+            const customEvent = e as CustomEvent<{ message: string; type: 'success' | 'error' | 'info' }>;
+            showNotification(customEvent.detail.message, customEvent.detail.type);
+        };
         window.addEventListener('refresh-profiles', handleRefresh);
-        return () => window.removeEventListener('refresh-profiles', handleRefresh);
-    }, [loadProfiles]);
+        window.addEventListener('show-notification', handleShowNotification);
+        return () => {
+            window.removeEventListener('refresh-profiles', handleRefresh);
+            window.removeEventListener('show-notification', handleShowNotification);
+        };
+    }, [loadProfiles, showNotification]);
 
     const activeCount = profiles.filter((p: Profile) => p.isActive).length;
 
@@ -1037,7 +2304,25 @@ export default function App() {
                     <FlowProjectsTab
                         profiles={profiles}
                         onCreateProjectsBatch={handleCreateFlowProjectsBatch}
+                        onUpdateProfileMetadata={handleUpdateProfileMetadata}
                     />
+                </div>
+
+                <div className={`tab-content ${activeTab === 'flow-images' ? 'active' : ''}`}>
+                    <FlowImagesTab
+                        profiles={profiles}
+                        onGenerateImage={generateImage}
+                        generating={generatingImage}
+                        lastResult={lastGeneratedImage}
+                        error={imageError}
+                        onClearResult={resetGeneratedImage}
+                        onOpenProfile={openProfile}
+                        onWaitForProfileReady={waitForProfileReady}
+                    />
+                </div>
+
+                <div className={`tab-content ${activeTab === 'entities' ? 'active' : ''}`}>
+                    <EntitiesTab profiles={profiles} onOpenProfile={openProfile} onWaitForProfileReady={waitForProfileReady} onOpenLightbox={(src, alt) => setLightbox({ src, alt })} />
                 </div>
 
                 <div className={`tab-content ${activeTab === 'about' ? 'active' : ''}`}>
@@ -1047,6 +2332,10 @@ export default function App() {
 
             {notification && (
                 <Notification message={notification.message} type={notification.type} onClose={() => setNotification(null)} />
+            )}
+
+            {lightbox && (
+                <ImageLightbox src={lightbox.src} alt={lightbox.alt} onClose={() => setLightbox(null)} />
             )}
         </div>
     );

@@ -892,3 +892,90 @@ textarea.form-input {
         grid-template-columns: 1fr;
     }
 }
+
+/* Flow Projects Grouped Display */
+.flow-projects-grouped {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.flow-project-group-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    transition: all 0.2s ease;
+}
+
+.flow-project-group-card:hover {
+    border-color: var(--accent-primary);
+    box-shadow: 0 4px 20px var(--shadow);
+}
+
+.flow-project-group-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+}
+
+.flow-project-group-name {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.flow-project-group-desc {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+}
+
+.flow-project-id-line {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+
+.flow-project-id-line code {
+    font-family: monospace;
+    background: var(--bg-secondary);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--accent-primary);
+}
+
+.flow-project-group-profiles {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.profile-project-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+}
+
+.profile-project-row .profile-name {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.profile-project-row .profile-project-id {
+    font-family: monospace;
+    font-size: 0.75rem;
+    color: var(--accent-primary);
+    background: var(--bg-primary);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.btn-sm {
+    padding: 4px 8px;
+    font-size: 0.85rem;
+}

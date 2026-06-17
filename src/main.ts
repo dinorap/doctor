@@ -312,7 +312,22 @@ app.use((req, _res, next) => {
 });
 
 // Serve static files from public directory
-app.use(express.static(path.join(__dirname, '../public')));
+app.use(express.static(path.join(__dirname, '../public'), {
+    setHeaders: (res) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+    }
+}));
+
+// Serve entity reference images from data/entity-references
+app.use('/data/entity-references', express.static(path.join(__dirname, '../data/entity-references'), {
+    setHeaders: (res) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+    }
+}));
 
 // API routes
 app.use('/api', routes);
@@ -368,7 +383,8 @@ server.listen(PORT, () => {
     ║    DELETE /api/profiles/:id                               ║
 ║    GET  /api/cloakbrowser/status                          ║
 ║    POST /api/flow/projects/create                         ║
-║    POST /api/flow/projects/create-batch
+║    POST /api/flow/projects/create-batch                   ║
+║    POST /api/flow/images/generate                         ║
     ║    POST /api/ext/callback                                ║
 ║  Events (WebSocket):                                      ║
 ║    browser-closed, profiles-updated                        ║

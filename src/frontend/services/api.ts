@@ -1,4 +1,4 @@
-import type { Profile, ApiResponse, CloakBrowserStatus, CreateProfileRequest, OpenProfileRequest, FlowCreditsResponse, PaygateTier, CreateFlowProjectsBatchRequest, FlowProject } from '../types';
+import type { Profile, ApiResponse, CloakBrowserStatus, CreateProfileRequest, OpenProfileRequest, FlowCreditsResponse, PaygateTier, CreateFlowProjectsBatchRequest, FlowProject, GeneratedImageResult } from '../types';
 
 const API_BASE = '';
 
@@ -78,6 +78,13 @@ class ApiService {
         });
     }
 
+    async updateProfileMetadata(id: string, metadata: Record<string, any>): Promise<{ id: string; metadata: Record<string, any> }> {
+        return this.request<{ id: string; metadata: Record<string, any> }>('/api/profiles/update-metadata', {
+            method: 'POST',
+            body: JSON.stringify({ id, metadata }),
+        });
+    }
+
     // CloakBrowser
     async getCloakBrowserStatus(): Promise<CloakBrowserStatus> {
         return this.request<CloakBrowserStatus>('/api/cloakbrowser/status');
@@ -88,6 +95,20 @@ class ApiService {
         return this.request<any>('/api/flow/projects/create', {
             method: 'POST',
             body: JSON.stringify({ profileId, name, description, toolName }),
+        });
+    }
+
+    async generateFlowImage(data: {
+        profileId: string;
+        prompt: string;
+        projectId?: string;
+        modelKey?: string;
+        aspectRatio?: string;
+        userPaygateTier?: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+    }): Promise<GeneratedImageResult> {
+        return this.request<GeneratedImageResult>('/api/flow/images/generate', {
+            method: 'POST',
+            body: JSON.stringify(data),
         });
     }
 

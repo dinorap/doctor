@@ -22,6 +22,7 @@ export interface Profile extends ProfileConfig {
     tier?: PaygateTier;
     hasSavedSession?: boolean;
     lastSaved?: string;
+    flowProjects?: FlowProject[];
 }
 
 export interface CreateProfileRequest {
@@ -79,6 +80,19 @@ export interface FlowProject {
     toolName?: string;
     createdAt?: string;
     projectId?: string;
+}
+
+export interface GeneratedImageResult {
+    profileId: string;
+    projectId: string;
+    modelKey: string;
+    aspectRatio: string;
+    userPaygateTier: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+    mediaId: string | null;
+    servingUri: string | null;
+    downloadUrl: string | null;
+    localPath: string | null;
+    rawResult: any;
 }
 
 export interface CloakBrowserStatus {

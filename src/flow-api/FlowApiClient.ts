@@ -200,6 +200,34 @@ export class FlowApiClient extends EventEmitter {
         return this.sendRequest<any>('createProject', params, timeoutMs);
     }
 
+    public async generateImages(params: {
+        prompt: string;
+        projectId: string;
+        aspectRatio?: string;
+        userPaygateTier?: PaygateTier;
+        modelKey?: string;
+        characterMediaIds?: string[];
+    }): Promise<any> {
+        this.ensureFlowKey();
+        const body: Record<string, any> = {
+            flowKey: this.flowKey as string,
+            projectId: params.projectId,
+            userPaygateTier: params.userPaygateTier || 'PAYGATE_TIER_TWO',
+            prompt: params.prompt,
+            aspectRatio: params.aspectRatio || 'IMAGE_ASPECT_RATIO_PORTRAIT',
+        };
+
+        if (params.modelKey) {
+            body.modelKey = params.modelKey;
+        }
+
+        if (params.characterMediaIds && params.characterMediaIds.length) {
+            body.characterMediaIds = params.characterMediaIds;
+        }
+
+        return this.sendRequest<any>('generateImages', body);
+    }
+
     public setFlowKey(flowKey: string): void {
         this.flowKey = flowKey;
         this.emit('flowKeyChanged', flowKey);

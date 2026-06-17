@@ -33,7 +33,7 @@ export class ExtensionBridge extends EventEmitter {
     private onMessage: ((data: any) => void) | null = null;
     private status: ExtensionStatus;
 
-    constructor(profileId: string, timeoutMs = 30000) {
+    constructor(profileId: string, timeoutMs = 90000) {
         super();
         this.profileId = profileId;
         this.timeoutMs = timeoutMs;
@@ -184,24 +184,31 @@ export class ExtensionBridge extends EventEmitter {
 
     public async sendRequest<T>(method: string, params: Record<string, any> = {}): Promise<T> {
         if (!this.isConnected()) {
-            throw new Error(
+            const err = new Error(
                 `Extension chưa kết nối cho profile ${this.profileId}. Vui lòng mở browser của profile này.`,
             );
+            logger.error('[ExtensionBridge] sendRequest failed: %s', err.message);
+            throw err;
         }
 
         const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 
+        logger.info('[ExtensionBridge] sendRequest %s id=%s params=%j', method, requestId, params);
+
         return new Promise<T>((resolve, reject) => {
             const timer = setTimeout(() => {
                 this.pending.delete(requestId);
+                logger.error('[ExtensionBridge] Request %s timed out after %dms', requestId, this.timeoutMs);
                 reject(new Error(`Flow request ${method} timed out`));
             }, this.timeoutMs);
 
             this.pending.set(requestId, {
                 resolve: (value: any) => {
+                    logger.info('[ExtensionBridge] Request %s resolved', requestId);
                     resolve(value as T);
                 },
                 reject: (reason?: any) => {
+                    logger.error('[ExtensionBridge] Request %s rejected: %s', requestId, reason);
                     reject(reason);
                 },
                 timer,
@@ -215,9 +222,11 @@ export class ExtensionBridge extends EventEmitter {
 
             try {
                 this.ws!.send(payload);
+                logger.info('[ExtensionBridge] Payload sent for %s', requestId);
             } catch (error) {
                 clearTimeout(timer);
                 this.pending.delete(requestId);
+                logger.error('[ExtensionBridge] Failed to send request: %s', error);
                 reject(new Error(`Failed to send request to extension: ${error}`));
             }
         });
@@ -274,6 +283,74 @@ export class ExtensionBridge extends EventEmitter {
         }
 
         return normalized;
+    }
+
+    public async generateImages(params: {
+        projectId: string;
+        prompt?: string;
+        aspectRatio?: string;
+        userPaygateTier?: string;
+        modelKey?: string;
+        characterMediaIds?: string[];
+    }): Promise<any> {
+        const seed = Math.floor(Math.random() * 294967296);
+        const requests = [
+            {
+                clientContext: {
+                    recaptchaContext: {
+                        token: '',
+                        applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                    },
+                    sessionId: '',
+                    projectId: params.projectId,
+                    tool: 'PINHOLE',
+                },
+                imageAspectRatio: params.aspectRatio || 'IMAGE_ASPECT_RATIO_LANDSCAPE',
+                seed,
+                imageModelName: params.modelKey || 'GEM_PIX_2',
+                prompt: params.prompt || '',
+                imageInputs: [],
+            },
+        ];
+
+        if (params.characterMediaIds && params.characterMediaIds.length) {
+            requests[0].imageInputs = params.characterMediaIds.map((id) => ({
+                imageInputType: 'IMAGE_INPUT_TYPE_REFERENCE',
+                name: id,
+            }));
+        }
+
+        const body = {
+            clientContext: {
+                recaptchaContext: {
+                    token: '',
+                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                },
+                sessionId: '',
+                projectId: params.projectId,
+                tool: 'PINHOLE',
+            },
+            mediaGenerationContext: {
+                batchId: crypto.randomUUID(),
+            },
+            useNewMedia: true,
+            requests,
+        };
+
+        logger.info('[Entity Gen] Request body: %s', JSON.stringify(body));
+
+        const response: any = await this.sendRequest('api_request', {
+            url: 'https://aisandbox-pa.googleapis.com/v1/projects/' + params.projectId + '/flowMedia:batchGenerateImages',
+            method: 'POST',
+            body,
+            captchaAction: 'IMAGE_GENERATION',
+        });
+
+        if (response?.error) {
+            throw new Error(response.error);
+        }
+
+        return response?.data ?? response;
     }
 
     public dispose(): void {

@@ -21,6 +21,23 @@ export interface SessionRecord {
     updatedAt: string;
 }
 
+export interface EntityReferenceRecord {
+    id: string;
+    name: string;
+    description: string;
+    entityType: string;
+    materialId: string;
+    mediaId: string;
+    localPath: string;
+    remoteUrl: string;
+    profileId: string;
+    projectId: string;
+    aspectRatio: string;
+    metadata: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
 export class DatabaseManager {
     private db: Database.Database;
     private dbPath: string;
@@ -82,6 +99,32 @@ export class DatabaseManager {
         this.db.exec(`
             CREATE INDEX IF NOT EXISTS idx_sessions_profileId ON sessions(profileId);
             CREATE INDEX IF NOT EXISTS idx_sessions_isActive ON sessions(isActive);
+        `);
+
+        // Entity references table for storing generated entity images
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS entity_references (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT,
+                entityType TEXT DEFAULT 'character',
+                materialId TEXT DEFAULT '3d_pixar',
+                mediaId TEXT,
+                localPath TEXT,
+                remoteUrl TEXT,
+                profileId TEXT NOT NULL,
+                projectId TEXT,
+                aspectRatio TEXT DEFAULT 'IMAGE_ASPECT_RATIO_PORTRAIT',
+                metadata TEXT DEFAULT '{}',
+                createdAt TEXT NOT NULL,
+                updatedAt TEXT NOT NULL,
+                FOREIGN KEY (profileId) REFERENCES profiles(id) ON DELETE CASCADE
+            )
+        `);
+
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_entity_references_profileId ON entity_references(profileId);
+            CREATE INDEX IF NOT EXISTS idx_entity_references_entityType ON entity_references(entityType);
         `);
 
         logger.info('Database tables initialized (simplified - session data stored in Chromium profile)');
@@ -255,6 +298,102 @@ export class DatabaseManager {
     deleteSessionsByProfileId(profileId: string): boolean {
         const stmt = this.db.prepare('DELETE FROM sessions WHERE profileId = ?');
         const result = stmt.run(profileId);
+        return result.changes > 0;
+    }
+
+    // Entity reference operations
+    createEntityReference(entity: Omit<EntityReferenceRecord, 'createdAt' | 'updatedAt'>): EntityReferenceRecord {
+        const now = new Date().toISOString();
+        const stmt = this.db.prepare(`
+            INSERT INTO entity_references (id, name, description, entityType, materialId, mediaId, localPath, remoteUrl, profileId, projectId, aspectRatio, metadata, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        stmt.run(
+            entity.id,
+            entity.name,
+            entity.description || '',
+            entity.entityType || 'character',
+            entity.materialId || '3d_pixar',
+            entity.mediaId || '',
+            entity.localPath || '',
+            entity.remoteUrl || '',
+            entity.profileId,
+            entity.projectId || '',
+            entity.aspectRatio || 'IMAGE_ASPECT_RATIO_PORTRAIT',
+            entity.metadata || '{}',
+            now,
+            now
+        );
+
+        return {
+            ...entity,
+            createdAt: now,
+            updatedAt: now,
+        };
+    }
+
+    getEntityReference(id: string): EntityReferenceRecord | undefined {
+        const stmt = this.db.prepare('SELECT * FROM entity_references WHERE id = ?');
+        return stmt.get(id) as EntityReferenceRecord | undefined;
+    }
+
+    getAllEntityReferences(): EntityReferenceRecord[] {
+        const stmt = this.db.prepare('SELECT * FROM entity_references ORDER BY createdAt DESC');
+        return stmt.all() as EntityReferenceRecord[];
+    }
+
+    getEntityReferencesByProfile(profileId: string): EntityReferenceRecord[] {
+        const stmt = this.db.prepare('SELECT * FROM entity_references WHERE profileId = ? ORDER BY createdAt DESC');
+        return stmt.all(profileId) as EntityReferenceRecord[];
+    }
+
+    getEntityReferencesByType(profileId: string, entityType: string): EntityReferenceRecord[] {
+        const stmt = this.db.prepare('SELECT * FROM entity_references WHERE profileId = ? AND entityType = ? ORDER BY createdAt DESC');
+        return stmt.all(profileId, entityType) as EntityReferenceRecord[];
+    }
+
+    updateEntityReference(id: string, updates: Partial<Omit<EntityReferenceRecord, 'id' | 'profileId' | 'createdAt' | 'updatedAt'>>): boolean {
+        const now = new Date().toISOString();
+        const fields: string[] = [];
+        const values: any[] = [];
+
+        const fieldMap: Record<string, string> = {
+            name: 'name',
+            description: 'description',
+            entityType: 'entityType',
+            materialId: 'materialId',
+            mediaId: 'mediaId',
+            localPath: 'localPath',
+            remoteUrl: 'remoteUrl',
+            projectId: 'projectId',
+            aspectRatio: 'aspectRatio',
+            metadata: 'metadata',
+        };
+
+        for (const [key, dbField] of Object.entries(fieldMap)) {
+            if (updates[key as keyof typeof updates] !== undefined) {
+                fields.push(`${dbField} = ?`);
+                values.push(updates[key as keyof typeof updates]);
+            }
+        }
+
+        if (fields.length === 0) return false;
+
+        fields.push('updatedAt = ?');
+        values.push(now, id);
+
+        const stmt = this.db.prepare(`
+            UPDATE entity_references SET ${fields.join(', ')} WHERE id = ?
+        `);
+
+        const result = stmt.run(...values);
+        return result.changes > 0;
+    }
+
+    deleteEntityReference(id: string): boolean {
+        const stmt = this.db.prepare('DELETE FROM entity_references WHERE id = ?');
+        const result = stmt.run(id);
         return result.changes > 0;
     }
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../services/api';
-import type { Profile, CloakBrowserStatus, CreateFlowProjectsBatchRequest } from '../types';
+import type { Profile, CloakBrowserStatus, CreateFlowProjectsBatchRequest, GeneratedImageResult } from '../types';
 
 export function useProfiles() {
     const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -121,6 +121,11 @@ export function useProfiles() {
     //      by a subsequent loadProfiles() call that re-reads the
     //      pre-broadcast value.
     useEffect(() => {
+        const handleProfilesUpdated = () => {
+            console.log('[useProfiles] profiles-updated via WebSocket, reloading...');
+            loadProfiles();
+        };
+
         const handleTierUpdated = (event: CustomEvent) => {
             const { profileId, tier } = event.detail || {};
             if (profileId && tier) {
@@ -147,9 +152,11 @@ export function useProfiles() {
             }
         };
 
+        window.addEventListener('profiles-updated', handleProfilesUpdated);
         window.addEventListener('tier-updated', handleTierUpdated as EventListener);
         window.addEventListener('extension-status', handleExtensionStatus as EventListener);
         return () => {
+            window.removeEventListener('profiles-updated', handleProfilesUpdated);
             window.removeEventListener('tier-updated', handleTierUpdated as EventListener);
             window.removeEventListener('extension-status', handleExtensionStatus as EventListener);
             if (refreshTimerRef.current) {
@@ -158,6 +165,16 @@ export function useProfiles() {
             }
         };
     }, [updateProfileTier, updateProfileExtensionStatus, loadProfiles]);
+
+    // Debug: log profile changes
+    useEffect(() => {
+        profiles.forEach(p => {
+            const projects = (p.metadata as any)?.flowProjects;
+            if (projects?.length > 0) {
+                console.log(`[useProfiles] Profile ${p.id} (${p.name}) has ${projects.length} flowProjects`);
+            }
+        });
+    }, [profiles]);
 
     const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -210,4 +227,135 @@ export function useCloakBrowser() {
     }, [checkStatus]);
 
     return { status, loading, checkStatus };
+}
+
+export function useFlowImages() {
+    const [generating, setGenerating] = useState(false);
+    const [lastResult, setLastResult] = useState<GeneratedImageResult | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    const generateImage = useCallback(async (data: {
+        profileId: string;
+        prompt: string;
+        projectId?: string;
+        modelKey?: string;
+        aspectRatio?: string;
+        userPaygateTier?: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+    }) => {
+        setGenerating(true);
+        setError(null);
+        try {
+            const result = await api.generateFlowImage({
+                profileId: data.profileId,
+                prompt: data.prompt,
+                projectId: data.projectId,
+                modelKey: data.modelKey,
+                aspectRatio: data.aspectRatio,
+                userPaygateTier: data.userPaygateTier,
+            });
+            setLastResult(result);
+            return result;
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Lỗi khi tạo ảnh';
+            setError(message);
+            throw err;
+        } finally {
+            setGenerating(false);
+        }
+    }, []);
+
+    const reset = useCallback(() => {
+        setLastResult(null);
+        setError(null);
+    }, []);
+
+    return {
+        generating,
+        lastResult,
+        error,
+        generateImage,
+        reset,
+    };
+}
+
+export interface GeneratedEntityResult {
+    id: string;
+    name: string;
+    description: string;
+    entityType: string;
+    materialId: string;
+    profileId: string;
+    projectId: string;
+    mediaId?: string;
+    localPath?: string;
+    remoteUrl?: string;
+    aspectRatio?: string;
+    metadata?: string;
+    success: boolean;
+}
+
+export function useEntities() {
+    const [generating, setGenerating] = useState(false);
+    const [lastResult, setLastResult] = useState<GeneratedEntityResult | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    const generateEntity = useCallback(async (data: {
+        name: string;
+        description: string;
+        entityType: string;
+        materialId: string;
+        profileId: string;
+        projectId?: string;
+        materialStyle?: any;
+        modelKey?: string;
+        aspectRatio?: string;
+    }) => {
+        setGenerating(true);
+        setError(null);
+        try {
+            const res = await fetch('/api/entities/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: data.name,
+                    description: data.description,
+                    entityType: data.entityType,
+                    materialId: data.materialId,
+                    profileId: data.profileId,
+                    projectId: data.projectId,
+                    materialStyle: data.materialStyle,
+                    modelKey: data.modelKey,
+                    aspectRatio: data.aspectRatio,
+                }),
+            });
+            const response = await res.json();
+            if (response.success) {
+                setLastResult(response.data);
+                return response.data;
+            } else {
+                const errMsg = response.error || 'Lỗi khi tạo entity';
+                setError(errMsg);
+                throw new Error(errMsg);
+            }
+        } catch (err) {
+            const message = err instanceof Error ? err.message : 'Lỗi khi tạo entity';
+            setError(message);
+            throw err;
+        } finally {
+            setGenerating(false);
+        }
+    }, []);
+
+    const reset = useCallback(() => {
+        setLastResult(null);
+        setError(null);
+    }, []);
+
+    return {
+        generating,
+        lastResult,
+        error,
+        generateEntity,
+        reset,
+    };
 }
