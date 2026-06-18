@@ -666,7 +666,6 @@ body {
 
 /* Modal */
 .modal-overlay {
-    display: none;
     position: fixed;
     top: 0;
     left: 0;
@@ -692,6 +691,16 @@ body {
     border: 1px solid var(--border);
     box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
     animation: modalIn 0.3s ease;
+}
+
+.modal-content {
+    background: var(--bg-primary);
+    border-radius: 12px;
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 
 @keyframes modalIn {
@@ -975,7 +984,48 @@ textarea.form-input {
     border-radius: 4px;
 }
 
-.btn-sm {
-    padding: 4px 8px;
-    font-size: 0.85rem;
+/* Prompt Input Row */
+.prompt-input-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.prompt-input-row textarea {
+    flex: 1;
+}
+
+.library-btn {
+    flex-shrink: 0;
+    margin-top: 0;
+    height: fit-content;
+}
+
+/* Prompt Entity Badge */
+.prompt-entity-badge {
+    font-size: 0.75rem;
+    color: var(--accent-primary);
+    background: rgba(99, 102, 241, 0.15);
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 8px;
+    font-weight: 500;
+}
+
+/* Button secondary */
+.btn-secondary {
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+}
+
+.btn-secondary:hover {
+    background: var(--bg-card-hover);
+    color: var(--text-primary);
+    border-color: var(--text-muted);
+}
+
+/* Accent bg for selected items */
+.accent-bg {
+    background: rgba(99, 102, 241, 0.1);
 }

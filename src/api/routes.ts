@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+﻿import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -12,7 +12,182 @@ import { ExtensionBridgeRegistry } from '../flow-api/ExtensionBridgeRegistry';
 import { FlowApiRegistry } from '../flow-api/FlowApiRegistry';
 import imageModels from '../../veo_models.json';
 
+/**
+ * Resolve frontend model label to actual model key
+ * Based on veo_models.json structure
+ * Supports: T2V (text to video), R2V (reference to video), I2V (image-to-video)
+ *
+ * Frontend may send model labels with prefixes like:
+ * - "image veo 3.1 - fast" -> strip "image " -> use I2V
+ * - "reference veo 3.1 - fast" -> strip "reference " -> use R2V
+ * - "omni flash" -> use T2V with OMNI_FLASH
+ */
+function resolveVideoModelKey(
+    modelLabel: string,
+    aspectRatio: string,
+    tier: string,
+    mode: 'start_image' | 'start_end' | 'references',
+    duration?: string
+): string {
+    const isPortrait = aspectRatio === 'VIDEO_ASPECT_RATIO_PORTRAIT';
+    const normalizedLabel = modelLabel.toLowerCase().trim();
+    const tierKey = tier === 'PAYGATE_TIER_ONE' ? 'PAYGATE_TIER_ONE' : 'PAYGATE_TIER_TWO';
+    const models = (imageModels as any).video_models?.[tierKey];
+
+    logger.info(`[resolveVideoModelKey] >>> IN modelLabel=${modelLabel} aspectRatio=${aspectRatio} tier=${tier} mode=${mode} duration=${duration} tierKey=${tierKey} modelsKeys=${Object.keys(models || {})} modeModelsKeys=${models ? Object.keys(models) : 'null'}`);
+
+    if (!models) {
+        return 'veo_3_1_t2v_fast_ultra';
+    }
+
+    // Strip prefixes that frontend adds for display purposes
+    // "image veo 3.1 - fast" -> "veo 3.1 - fast"
+    // "reference veo 3.1 - fast" -> "veo 3.1 - fast"
+    const labelWithoutPrefix = normalizedLabel
+        .replace(/^image\s+/, '')
+        .replace(/^reference\s+/, '')
+        .replace(/^text\s+/, '')
+        .trim();
+
+    // Determine mode type based on veo_models.json: T2V, R2V, I2V
+    // I2V = start_image or start_end (image-to-video with start/end images)
+    // R2V = references (reference-to-video)
+    // T2V = text-to-video (start_image without images)
+    let modeKey: string;
+    if (mode === 'start_end') {
+        modeKey = 'I2V';
+    } else if (mode === 'start_image') {
+        // Check if it's actually an i2v request (has prefix)
+        if (normalizedLabel.startsWith('image ')) {
+            modeKey = 'I2V';
+        } else {
+            modeKey = 'T2V';
+        }
+    } else if (mode === 'references') {
+        modeKey = 'R2V';
+    } else {
+        modeKey = 'T2V';
+    }
+
+    // Model quality tier based on label
+    let qualityKey: string;
+    if (normalizedLabel.includes('omni flash')) {
+        qualityKey = 'OMNI_FLASH';
+    } else if (labelWithoutPrefix.includes('fast')) {
+        qualityKey = 'FAST';
+    } else if (labelWithoutPrefix.includes('quality')) {
+        qualityKey = 'QUALITY';
+    } else if (labelWithoutPrefix.includes('lite') && labelWithoutPrefix.includes('priority')) {
+        qualityKey = 'LITE_LOW_PRIORITY';
+    } else if (labelWithoutPrefix.includes('lite')) {
+        qualityKey = 'LITE';
+    } else {
+        qualityKey = 'FAST'; // Default to FAST
+    }
+
+    // Get model config from veo_models.json
+    const modeModels = models[modeKey];
+    logger.info(`[resolveVideoModelKey] modeKey=${modeKey} modeModels=${JSON.stringify(modeModels)}`);
+    if (!modeModels) {
+        logger.warn(`[Video Model] Mode ${modeKey} not found in tier ${tierKey}, falling back to T2V`);
+        // Return mode-appropriate fallback, not hardcoded T2V
+        if (modeKey === 'R2V') return isPortrait ? 'veo_3_1_r2v_fast_portrait_ultra' : 'veo_3_1_r2v_fast_landscape_ultra';
+        if (modeKey === 'I2V') return isPortrait ? 'veo_3_1_i2v_fast_portrait_ultra' : 'veo_3_1_i2v_fast_landscape_ultra';
+        return isPortrait ? 'veo_3_1_t2v_fast_portrait_ultra' : 'veo_3_1_t2v_fast_ultra';
+    }
+
+    const qualityConfig = modeModels[qualityKey];
+    logger.info(`[resolveVideoModelKey] qualityKey=${qualityKey} qualityConfig=${JSON.stringify(qualityConfig)} typeof=${typeof qualityConfig}`);
+    if (!qualityConfig) {
+        logger.warn(`[Video Model] Quality ${qualityKey} not found for mode ${modeKey}, falling back to FAST`);
+        const fastConfig = modeModels['FAST'];
+        if (!fastConfig) {
+            // Return mode-appropriate fallback
+            if (modeKey === 'R2V') return isPortrait ? 'veo_3_1_r2v_fast_portrait_ultra' : 'veo_3_1_r2v_fast_landscape_ultra';
+            if (modeKey === 'I2V') return isPortrait ? 'veo_3_1_i2v_fast_portrait_ultra' : 'veo_3_1_i2v_fast_landscape_ultra';
+            return 'veo_3_1_t2v_fast_ultra';
+        }
+        // Return default 8s landscape fast model
+        if (typeof fastConfig === 'string') {
+            return fastConfig;
+        }
+        return fastConfig['VIDEO_ASPECT_RATIO_LANDSCAPE'] || Object.values(fastConfig)[0] as string;
+    }
+
+    // Duration key for lookup (e.g., "4s" -> "VIDEO_DURATION_4S")
+    const durationKey = duration ? `VIDEO_DURATION_${duration.toUpperCase()}` : null;
+
+    // Omni Flash - direct duration to model key
+    if (qualityKey === 'OMNI_FLASH') {
+        if (durationKey && qualityConfig[durationKey]) {
+            return qualityConfig[durationKey];
+        }
+        return qualityConfig['VIDEO_DURATION_8S'] || 'abra_t2v_8s';
+    }
+
+    // Lite / Lite Low Priority - direct duration to model key (no aspect ratio)
+    if (qualityKey === 'LITE' || qualityKey === 'LITE_LOW_PRIORITY') {
+        if (durationKey && qualityConfig[durationKey]) {
+            return qualityConfig[durationKey];
+        }
+        return qualityConfig['VIDEO_DURATION_8S'] || Object.values(qualityConfig)[0] as string;
+    }
+
+    // FAST / QUALITY - check aspect ratio directly
+    if (typeof qualityConfig === 'object') {
+        logger.info(`[resolveVideoModelKey] qualityConfig=${JSON.stringify(qualityConfig)} aspectRatio=${aspectRatio} durationKey=${durationKey}`);
+
+        // Duration-specific config (4s/6s with aspect ratio)
+        if (durationKey && typeof qualityConfig[durationKey] === 'object') {
+            const durationAspectConfig = qualityConfig[durationKey] as Record<string, string>;
+            const result = durationAspectConfig[aspectRatio] || durationAspectConfig['VIDEO_ASPECT_RATIO_LANDSCAPE'];
+            logger.info(`[resolveVideoModelKey] RETURNING duration+aspect: ${result}`);
+            return result;
+        }
+
+        // Direct aspect ratio keys (no duration)
+        const directResult = qualityConfig[aspectRatio];
+        logger.info(`[resolveVideoModelKey] directResult=${directResult} isPortrait=${isPortrait}`);
+        if (directResult) {
+            logger.info(`[resolveVideoModelKey] RETURNING direct aspect ratio: ${directResult}`);
+            return directResult;
+        }
+
+        // Try 8s default
+        const config8s = qualityConfig['VIDEO_DURATION_8S'];
+        if (config8s) {
+            if (typeof config8s === 'string') {
+                logger.info(`[resolveVideoModelKey] RETURNING 8s string: ${config8s}`);
+                return config8s;
+            }
+            if (typeof config8s === 'object') {
+                const result = config8s[aspectRatio] || config8s['VIDEO_ASPECT_RATIO_LANDSCAPE'];
+                logger.info(`[resolveVideoModelKey] RETURNING 8s object: ${result}`);
+                return result;
+            }
+        }
+
+        const result = qualityConfig['VIDEO_ASPECT_RATIO_LANDSCAPE'] || Object.values(qualityConfig)[0] as string;
+        logger.info(`[resolveVideoModelKey] RETURNING last resort: ${result}`);
+        return result;
+    }
+
+    // Fallback - return mode-appropriate model
+    logger.info(`[resolveVideoModelKey] RETURNING fallback`);
+    if (modeKey === 'R2V') return isPortrait ? 'veo_3_1_r2v_fast_portrait_ultra' : 'veo_3_1_r2v_fast_landscape_ultra';
+    if (modeKey === 'I2V') return isPortrait ? 'veo_3_1_i2v_fast_portrait_ultra' : 'veo_3_1_i2v_fast_landscape_ultra';
+    return isPortrait ? 'veo_3_1_t2v_fast_portrait_ultra' : 'veo_3_1_t2v_fast_ultra';
+}
+
 const router = express.Router();
+
+/**
+ * Cache of media IDs whose status has been confirmed SUCCESSFUL.
+ * Used to short-circuit batchCheckAsyncVideoGenerationStatus calls -
+ * once we know a video is ready, no need to keep asking Google.
+ */
+const successfulMediaCache = new Map<string, { profileId: string; projectId: string; mediaItem: any; ts: number }>();
+const SUCCESS_CACHE_TTL_MS = 30 * 60 * 1000; // 30 min
 
 /**
  * GET /health - Health check
@@ -105,7 +280,7 @@ router.get('/extension/tier', async (req: Request, res: Response) => {
 
 /**
  * GET /flow/credits - Get Flow credits and tier for a single profile.
- * Query: ?profileId=xxx (required) — per-profile, no cross-profile leakage.
+ * Query: ?profileId=xxx (required) ? per-profile, no cross-profile leakage.
  */
 router.get('/flow/credits', async (req: Request, res: Response) => {
     try {
@@ -251,7 +426,7 @@ router.post('/flow/projects/create', async (req: Request, res: Response) => {
             if (!flowClient || !flowClient.hasFlowKey()) {
                 return res.status(503).json({
                     success: false,
-                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                    error: 'Flow client ch?a c? flowKey. Extension c?a profile n?y ch?a k?t n?i ho?c ch?a capture token.',
                 });
             }
             result = await flowClient.createProject(name.trim(), (toolName as string) || 'PINHOLE');
@@ -266,7 +441,7 @@ router.post('/flow/projects/create', async (req: Request, res: Response) => {
                 toolName: toolName || 'PINHOLE',
                 result,
             },
-            message: 'Tạo project trên Flow thành công',
+            message: 'T?o project tr?n Flow th?nh c?ng',
         });
     } catch (error: any) {
         logger.error('Error creating Flow project:', error);
@@ -343,7 +518,7 @@ router.post('/flow/projects/create-batch', async (req: Request, res: Response) =
                 if (!flowClient || !flowClient.hasFlowKey()) {
                     return {
                         status: 'error',
-                        error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                        error: 'Flow client ch?a c? flowKey. Extension c?a profile n?y ch?a k?t n?i ho?c ch?a capture token.',
                     };
                 }
                 result = await flowClient.createProject(projectName, (toolName as string) || 'PINHOLE');
@@ -395,7 +570,7 @@ router.post('/flow/projects/create-batch', async (req: Request, res: Response) =
         res.json({
             success: true,
             data: settled,
-            message: `Đã xử lý ${settled.length} profile`,
+            message: `?? x? l? ${settled.length} profile`,
         });
     } catch (error: any) {
         logger.error('Error creating Flow projects batch:', error);
@@ -493,7 +668,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
         if (!targetProjectId) {
             return res.status(503).json({
                 success: false,
-                error: 'Không có Flow project khả dụng. Hãy mở profile và đăng nhập Google Flow, hoặc cung cấp projectId.',
+                error: 'Kh?ng c? Flow project kh? d?ng. H?y m? profile v? ??ng nh?p Google Flow, ho?c cung c?p projectId.',
             });
         }
 
@@ -525,7 +700,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
             if (!flowClient || !flowClient.hasFlowKey()) {
                 return res.status(503).json({
                     success: false,
-                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                    error: 'Flow client ch?a c? flowKey. Extension c?a profile n?y ch?a k?t n?i ho?c ch?a capture token.',
                 });
             }
 
@@ -596,7 +771,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
             logger.error('Flow image generation returned empty result:', JSON.stringify(result)?.slice(0, 1000));
             return res.status(500).json({
                 success: false,
-                error: 'API không trả về ảnh. Có thể tier không đủ, profile chưa ready, hoặc cần chờ thêm.',
+                error: 'API kh?ng tr? v? ?nh. C? th? tier kh?ng ??, profile ch?a ready, ho?c c?n ch? th?m.',
             });
         }
 
@@ -644,7 +819,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
                 localPath,
                 rawResult: result,
             },
-            message: usedBridge ? 'Tạo ảnh thành công qua Extension' : 'Tạo ảnh thành công qua Flow API',
+            message: usedBridge ? 'T?o ?nh th?nh c?ng qua Extension' : 'T?o ?nh th?nh c?ng qua Flow API',
         });
     } catch (error: any) {
         logger.error('Error generating Flow image:', error);
@@ -714,7 +889,7 @@ router.post('/flow/projects/prepare-profile', async (req: Request, res: Response
         if (!ready) {
             return res.status(503).json({
                 success: false,
-                error: 'Extension chưa sẵn sàng sau thời gian chờ. Hãy đảm bảo profile đã đăng nhập Google Flow và extension đã capture token.',
+                error: 'Extension ch?a s?n s?ng sau th?i gian ch?. H?y ??m b?o profile ?? ??ng nh?p Google Flow v? extension ?? capture token.',
             });
         }
 
@@ -725,7 +900,7 @@ router.post('/flow/projects/prepare-profile', async (req: Request, res: Response
                 opened: !browserManager.isActive(profileId),
                 ready: true,
             },
-            message: 'Profile đã sẵn sàng để tạo project',
+            message: 'Profile ?? s?n s?ng ?? t?o project',
         });
     } catch (error: any) {
         logger.error('Error preparing profile for Flow project:', error);
@@ -1025,6 +1200,7 @@ router.post('/profiles/open', async (req: Request, res: Response) => {
                 let source = 'unknown';
                 let creditsData: any = null;
                 let authFailed = false;
+                let isConnectionError = false;
 
                 // Try extension bridge first (direct from browser)
                 const bridge = extensionRegistry?.get(request.id);
@@ -1042,17 +1218,19 @@ router.post('/profiles/open', async (req: Request, res: Response) => {
                             tier = rawTier;
                             source = 'extension';
                         } else {
-                            logger.warn(`[Tier Detect #${attempt}] Extension returned no userPaygateTier (got: %s) — keeping UNKNOWN`, rawTier);
+                            logger.warn(`[Tier Detect #${attempt}] Extension returned no userPaygateTier (got: %s) ? keeping UNKNOWN`, rawTier);
                         }
                         logger.info(`[Tier Detect #${attempt}] Extension credits data`, creditsData);
                     } catch (extError) {
                         // Extension returns NO_FLOW_KEY when the user hasn't
                         // logged into Flow in this profile yet. That's a
-                        // permanent state until they log in — no point
+                        // permanent state until they log in ? no point
                         // retrying every 5s.
                         authFailed = /no_flow_key|not signed in|login required/i.test(
                             extError instanceof Error ? extError.message : String(extError),
                         );
+                        isConnectionError = extError instanceof Error &&
+                            extError.message.includes('Failed to fetch');
                         logger.warn(`[Tier Detect #${attempt}] Extension bridge getCredits failed: %s`, extError);
                     }
                 }
@@ -1070,7 +1248,7 @@ router.post('/profiles/open', async (req: Request, res: Response) => {
                                 tier = rawTier;
                                 source = 'flow_api';
                             } else {
-                                logger.warn(`[Tier Detect #${attempt}] Flow API returned no userPaygateTier (got: %s) — keeping UNKNOWN`, rawTier);
+                                logger.warn(`[Tier Detect #${attempt}] Flow API returned no userPaygateTier (got: %s) ? keeping UNKNOWN`, rawTier);
                             }
                             logger.info(`[Tier Detect #${attempt}] Flow API credits data`, creditsData);
                         } catch (flowError) {
@@ -1096,16 +1274,19 @@ router.post('/profiles/open', async (req: Request, res: Response) => {
                 });
 
                 // Retry policy:
-                // - Got a real tier → done.
-                // - Auth failure (NO_FLOW_KEY, 401, login required) → stop
+                // - Got a real tier ? done.
+                // - Auth failure (NO_FLOW_KEY, 401, login required) ? stop
                 //   entirely. The user has to log into Flow manually; we
                 //   will detect the new tier on the next `extension_ready`
                 //   / `token_captured` push.
-                // - Other UNKNOWN → retry up to 3 times with a 5s gap.
-                if (tier === 'UNKNOWN' && !authFailed && attempt < 3) {
+                // - Connection error (Failed to fetch) ? stop, extension not ready
+                // - Other UNKNOWN ? retry up to 3 times with a 5s gap.
+                if (tier === 'UNKNOWN' && !authFailed && !isConnectionError && attempt < 3) {
                     setTimeout(() => detectTier(attempt + 1), 5000);
                 } else if (authFailed) {
-                    logger.info('[Tier Detect] Stopped retrying for profile %s — user has not signed into Flow (will resume when extension sends a new token)', request.id);
+                    logger.info('[Tier Detect] Stopped retrying for profile %s - user has not signed into Flow (will resume when extension sends a new token)', request.id);
+                } else if (isConnectionError) {
+                    logger.info('[Tier Detect] Stopped retrying for profile %s - extension not ready (will resume on extension_ready)', request.id);
                 }
             } catch (error) {
                 logger.warn('Background tier detection failed for profile %s: %s', request.id, error);
@@ -1126,7 +1307,7 @@ router.post('/profiles/open', async (req: Request, res: Response) => {
         };
         waitForBridge(15000).then((ready) => {
             if (!ready) {
-                logger.warn('[Tier Detect] Extension never connected for profile %s within 15s — will still attempt from Flow API', request.id);
+                logger.warn('[Tier Detect] Extension never connected for profile %s within 15s ? will still attempt from Flow API', request.id);
             }
             detectTier();
         });
@@ -1335,7 +1516,7 @@ router.post('/profiles/:id/close', async (req: Request, res: Response) => {
             });
         }
 
-        // Detect and save tier in background (non-blocking) — using
+        // Detect and save tier in background (non-blocking) ? using
         // the per-profile FlowApiClient (if any) so we don't overwrite
         // another profile's flowKey.
         const flowRegistry = (req.app.locals as any).flowRegistry as FlowApiRegistry | undefined;
@@ -1421,7 +1602,7 @@ router.post('/profiles/:id/tier/refresh', async (req: Request, res: Response) =>
         let tier: PaygateTier = 'UNKNOWN';
         let source = 'default';
 
-        // Try extension bridge first (real-time from browser) — keyed by profileId
+        // Try extension bridge first (real-time from browser) ? keyed by profileId
         const bridge = extensionRegistry?.get(profileId);
         if (bridge && bridge.isConnected()) {
             try {
@@ -1591,6 +1772,163 @@ router.get('/entities/:id', (req: Request, res: Response) => {
 });
 
 /**
+ * GET /library/entities - List entities grouped by type for Library UI
+ */
+router.get('/library/entities', (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const profileId = req.query.project_id as string | undefined;
+
+        let entities: any[];
+        if (profileId) {
+            entities = db.getEntityReferencesByProfile(profileId);
+        } else {
+            entities = db.getAllEntityReferences();
+        }
+
+        // If no entities in DB, scan disk directories for existing images
+        if (entities.length === 0) {
+            console.log('[Library] No entities in DB, scanning disk directories...');
+            const entitiesFromDisk: any[] = [];
+            const entitiesBaseDir = path.join(process.cwd(), 'data', 'entity-references');
+
+            try {
+                if (fs.existsSync(entitiesBaseDir)) {
+                    const profileDirs = fs.readdirSync(entitiesBaseDir);
+                    for (const profileDir of profileDirs) {
+                        const profilePath = path.join(entitiesBaseDir, profileDir);
+                        if (!fs.statSync(profilePath).isDirectory()) continue;
+
+                        const files = fs.readdirSync(profilePath);
+                        for (const file of files) {
+                            // Only process image files (skip upscaled versions)
+                            if (!file.match(/\.(jpg|jpeg|png)$/i)) continue;
+                            if (file.includes('_4k') || file.includes('_2k')) continue;
+
+                            const mediaId = file.replace(/\.(jpg|jpeg|png)$/i, '');
+                            const localPath = path.join(profilePath, file);
+
+                            // Try to determine entity type from directory structure or filename
+                            const entityType = 'character'; // Default
+                            const name = mediaId.substring(0, 8) + '...'; // Use truncated ID as name
+
+                            entitiesFromDisk.push({
+                                id: mediaId,
+                                name: name,
+                                slug: mediaId.substring(0, 8),
+                                entity_type: entityType,
+                                description: `Entity from disk (${file})`,
+                                image_prompt: name,
+                                reference_image_url: `/data/entity-references/${profileDir}/${file}`,
+                                media_id: mediaId,
+                                profileId: profileDir,
+                            });
+                        }
+                    }
+                }
+                console.log(`[Library] Found ${entitiesFromDisk.length} images on disk`);
+            } catch (diskError: any) {
+                console.error('[Library] Error scanning disk:', diskError.message);
+            }
+
+            entities = entitiesFromDisk;
+        }
+
+        // Filter by entity_type if specified
+        const entityType = req.query.entity_type as string | undefined || req.query.entityType as string | undefined;
+        if (entityType) {
+            entities = entities.filter(e => e.entityType === entityType || e.entity_type === entityType);
+        }
+
+        // Filter by search if specified
+        const search = req.query.search as string | undefined;
+        if (search) {
+            const searchLower = search.toLowerCase();
+            entities = entities.filter(e =>
+                e.name?.toLowerCase().includes(searchLower) ||
+                e.description?.toLowerCase().includes(searchLower)
+            );
+        }
+
+        // Filter by has_image if specified
+        const hasImage = req.query.has_image === 'true';
+        if (hasImage) {
+            entities = entities.filter(e => e.mediaId || e.media_id);
+        }
+
+        // Group by entity type
+        const grouped: Record<string, any[]> = {
+            character: [],
+            location: [],
+            creature: [],
+            visual_asset: [],
+            generic_troop: [],
+            faction: [],
+        };
+
+        for (const entity of entities) {
+            const etype = entity.entityType || entity.entity_type || 'character';
+            if (!grouped[etype]) grouped[etype] = [];
+            grouped[etype].push({
+                id: entity.id,
+                name: entity.name,
+                slug: entity.slug || entity.name?.toLowerCase().replace(/\s+/g, '-'),
+                entity_type: etype,
+                description: entity.description,
+                image_prompt: entity.image_prompt || entity.description || entity.name,
+                reference_image_url: entity.reference_image_url || entity.remoteUrl || entity.localPath,
+                media_id: entity.media_id || entity.mediaId,
+            });
+        }
+
+        const result = {
+            entities: entities.map(e => ({
+                id: e.id,
+                name: e.name,
+                slug: e.slug || e.name?.toLowerCase().replace(/\s+/g, '-'),
+                entity_type: e.entityType || e.entity_type || 'character',
+                description: e.description,
+                image_prompt: e.image_prompt || e.description || e.name,
+                reference_image_url: e.reference_image_url || e.remoteUrl || e.localPath,
+                media_id: e.media_id || e.mediaId,
+            })),
+            grouped,
+            counts: {
+                character: grouped.character?.length || 0,
+                location: grouped.location?.length || 0,
+                creature: grouped.creature?.length || 0,
+                visual_asset: grouped.visual_asset?.length || 0,
+                generic_troop: grouped.generic_troop?.length || 0,
+                faction: grouped.faction?.length || 0,
+            },
+            total: entities.length,
+        };
+
+        res.json(result);
+    } catch (error: any) {
+        logger.error('Error getting library entities:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+/**
+ * GET /library/entity-types - List entity types for Library UI tabs
+ */
+router.get('/library/entity-types', (_req: Request, res: Response) => {
+    res.json([
+        { id: 'character', name: 'Characters', icon: '??', description: 'People, heroes, villains, NPCs' },
+        { id: 'location', name: 'Locations', icon: '??', description: 'Scenes, environments, backgrounds' },
+        { id: 'creature', name: 'Creatures', icon: '??', description: 'Monsters, animals, fantasy beings' },
+        { id: 'visual_asset', name: 'Assets', icon: '??', description: 'Props, costumes, vehicles' },
+        { id: 'generic_troop', name: 'Troops', icon: '??', description: 'Soldiers, armies, groups' },
+        { id: 'faction', name: 'Factions', icon: '??', description: 'Teams, guilds, organizations' },
+    ]);
+});
+
+/**
  * POST /entities/generate - Generate a new entity reference image
  */
 router.post('/entities/generate', async (req: Request, res: Response) => {
@@ -1725,7 +2063,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             if (!flowClient.hasFlowKey()) {
                 return res.status(503).json({
                     success: false,
-                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                    error: 'Flow client ch?a c? flowKey. Extension c?a profile n?y ch?a k?t n?i ho?c ch?a capture token.',
                 });
             }
             result = await flowClient.generateImages({
@@ -1750,7 +2088,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             logger.error('Entity generation API returned empty or invalid response:', JSON.stringify(result)?.slice(0, 500));
             return res.status(500).json({
                 success: false,
-                error: 'API không trả về kết quả hợp lệ. Có thể tier không đủ hoặc cần chờ profile ready.',
+                error: 'API kh?ng tr? v? k?t qu? h?p l?. C? th? tier kh?ng ?? ho?c c?n ch? profile ready.',
             });
         }
 
@@ -1779,7 +2117,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             logger.error('Could not extract mediaId or servingUri from API response:', JSON.stringify(result)?.slice(0, 1000));
             return res.status(500).json({
                 success: false,
-                error: 'Không tìm thấy ảnh trong response. Có thể API trả lỗi 400 hoặc tier không đủ.',
+                error: 'Kh?ng t?m th?y ?nh trong response. C? th? API tr? l?i 400 ho?c tier kh?ng ??.',
             });
         }
 
@@ -2175,3 +2513,809 @@ function buildEntityPrompt(name: string, description: string | undefined, entity
 }
 
 export default router;
+
+/**
+ * POST /flow/videos/upload-image - Upload an image to use as start/end image for video generation
+ * Body: { profileId, projectId, sceneId?, filePath?, fileName?, fileData? (base64) }
+ */
+router.post('/flow/videos/upload-image', async (req: Request, res: Response) => {
+    try {
+        const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
+        const flowRegistry = (req.app.locals as any).flowRegistry as FlowApiRegistry | undefined;
+        const db = req.app.locals.db as DatabaseManager;
+        const profileManager = new ProfileManager(db);
+
+        const {
+            profileId,
+            projectId,
+            sceneId,
+            filePath,
+            fileName,
+            fileData, // base64 encoded file data
+        } = req.body || {};
+
+        if (!profileId || typeof profileId !== 'string') {
+            return res.status(400).json({ success: false, error: 'profileId is required' });
+        }
+        if (!projectId || typeof projectId !== 'string') {
+            return res.status(400).json({ success: false, error: 'projectId is required' });
+        }
+
+        const profile = profileManager.getProfile(profileId);
+        if (!profile) {
+            return res.status(404).json({ success: false, error: 'Profile not found' });
+        }
+
+        // Create sceneId if not provided
+        const uploadSceneId = sceneId || `upload-${Date.now()}`;
+
+        // Handle file upload - either from path or base64 data
+        let resolvedFilePath = filePath;
+        
+        if (!resolvedFilePath && fileData) {
+            // Save base64 file to temp location
+            const tempDir = path.join(process.cwd(), 'data', 'temp-uploads', profileId);
+            if (!fs.existsSync(tempDir)) {
+                fs.mkdirSync(tempDir, { recursive: true });
+            }
+            resolvedFilePath = path.join(tempDir, `${uploadSceneId}-${fileName || 'upload.png'}`);
+            const buffer = Buffer.from(fileData, 'base64');
+            fs.writeFileSync(resolvedFilePath, buffer);
+            logger.info(`[Upload] Saved temp file to: ${resolvedFilePath}`);
+        }
+
+        if (!resolvedFilePath) {
+            return res.status(400).json({ success: false, error: 'filePath or fileData is required' });
+        }
+
+        const bridge = extensionRegistry?.get(profileId);
+        const flowClient = flowRegistry?.getOrCreate(profileId);
+
+        let result: any = null;
+        let usedBridge = false;
+
+        if (bridge && bridge.isConnected()) {
+            try {
+                // Pass fileData directly - bridge can use it in browser context
+                result = await bridge.uploadImage({
+                    projectId,
+                    sceneId: uploadSceneId,
+                    fileName: fileName as string | undefined,
+                    fileData, // Pass base64 data directly
+                });
+                usedBridge = true;
+            } catch (bridgeError: any) {
+                logger.warn('Extension bridge uploadImage failed for %s, falling back: %s', profileId, bridgeError.message);
+            }
+        }
+
+        if (!usedBridge) {
+            if (!flowClient || !flowClient.hasFlowKey()) {
+                return res.status(503).json({
+                    success: false,
+                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                });
+            }
+            // For server-side fallback, read file and pass base64 directly
+            // FlowApiClient.uploadImage expects: (imageBase64, mimeType, projectId, fileName)
+            let imageBase64 = fileData;
+            let mimeType = 'image/jpeg';
+            
+            if (!imageBase64 && resolvedFilePath && fs.existsSync(resolvedFilePath)) {
+                const buffer = fs.readFileSync(resolvedFilePath);
+                imageBase64 = buffer.toString('base64');
+                // Detect mime type from extension
+                const ext = resolvedFilePath.toLowerCase();
+                if (ext.endsWith('.png')) mimeType = 'image/png';
+                else if (ext.endsWith('.webp')) mimeType = 'image/webp';
+            }
+            
+            result = await flowClient.uploadImage(
+                imageBase64!,
+                mimeType,
+                projectId,
+                fileName as string || 'upload.jpg'
+            );
+        }
+
+        // Extract media ID from response
+        // Python API returns: { media: { name: "uuid" } }
+        // Extension/Bridge returns: { result: { status: 200, data: { media: { name: "uuid" } } } }
+        const rawData = result?.result?.data || result?.data || result || {};
+        const mediaId = result?.media?.name || 
+                        result?._mediaId || 
+                        result?.data?.media?.name ||
+                        rawData.media?.name ||
+                        null;
+        
+        // Cleanup temp file if it was created
+        if (fileData && resolvedFilePath && fs.existsSync(resolvedFilePath)) {
+            try {
+                fs.unlinkSync(resolvedFilePath);
+                logger.info(`[Upload] Cleaned up temp file: ${resolvedFilePath}`);
+            } catch (e) {
+                // ignore cleanup errors
+            }
+        }
+
+        if (!mediaId) {
+            logger.warn('[Upload] No mediaId in response:', JSON.stringify(result)?.slice(0, 500));
+        } else {
+            logger.info(`[Upload] Success - mediaId: ${mediaId}`);
+        }
+
+        res.json({
+            success: true,
+            data: {
+                profileId,
+                projectId,
+                sceneId: uploadSceneId,
+                mediaId,
+                rawResult: result,
+            },
+            message: usedBridge ? 'Upload ảnh thành công qua Extension' : 'Upload ảnh thành công qua Flow API',
+        });
+    } catch (error: any) {
+        logger.error('Error uploading Flow video image:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * POST /flow/videos/generate - Generate a video from a start image (or start+end image)
+ * Body: { profileId, projectId, sceneId, prompt, mode, aspectRatio?, userPaygateTier?, startImageMediaId?, referenceMediaIds?, endImageMediaId?, modelKey?, duration? }
+ */
+router.post('/flow/videos/generate', async (req: Request, res: Response) => {
+    try {
+        const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
+        const flowRegistry = (req.app.locals as any).flowRegistry as FlowApiRegistry | undefined;
+        const db = req.app.locals.db as DatabaseManager;
+        const profileManager = new ProfileManager(db);
+
+        const {
+            profileId,
+            projectId,
+            sceneId,
+            prompt,
+            mode,
+            model, // frontend model label: 'omni flash', 'veo 3.1 - fast', etc.
+            aspectRatio,
+            userPaygateTier,
+            startImageMediaId,
+            referenceMediaIds,
+            endImageMediaId,
+            modelKey,
+            duration,
+        } = req.body || {};
+
+        if (!profileId || typeof profileId !== 'string') {
+            return res.status(400).json({ success: false, error: 'profileId is required' });
+        }
+        if (!projectId || typeof projectId !== 'string') {
+            return res.status(400).json({ success: false, error: 'projectId is required' });
+        }
+        if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+            return res.status(400).json({ success: false, error: 'prompt is required' });
+        }
+        if (!sceneId || typeof sceneId !== 'string') {
+            return res.status(400).json({ success: false, error: 'sceneId is required' });
+        }
+        if (!mode || !['start_image', 'references', 'start_end'].includes(mode)) {
+            return res.status(400).json({ success: false, error: 'mode must be start_image, references, or start_end' });
+        }
+        if (mode === 'references' && (!Array.isArray(referenceMediaIds) || referenceMediaIds.length === 0)) {
+            return res.status(400).json({ success: false, error: 'referenceMediaIds is required for references mode' });
+        }
+        if (mode === 'start_end' && (!startImageMediaId || !endImageMediaId)) {
+            return res.status(400).json({ success: false, error: 'startImageMediaId and endImageMediaId are required for start_end mode' });
+        }
+
+        const profile = profileManager.getProfile(profileId);
+        if (!profile) {
+            return res.status(404).json({ success: false, error: 'Profile not found' });
+        }
+
+        const resolvedAspectRatio = typeof aspectRatio === 'string' && aspectRatio.trim()
+            ? aspectRatio.trim()
+            : 'VIDEO_ASPECT_RATIO_PORTRAIT';
+
+        const resolvedTier = (userPaygateTier === 'PAYGATE_TIER_ONE' || userPaygateTier === 'PAYGATE_TIER_TWO')
+            ? userPaygateTier
+            : ((profile.tier as any) || 'PAYGATE_TIER_TWO');
+
+        logger.info(`[Video Generate] Tier - userPaygateTier: ${userPaygateTier}, profile.tier: ${profile.tier}, resolvedTier: ${resolvedTier}`);
+
+        const bridge = extensionRegistry?.get(profileId);
+        const flowClient = flowRegistry?.getOrCreate(profileId);
+
+        // Resolve model label to model key
+        let resolvedModelKey = modelKey;
+        if (model && !modelKey) {
+            resolvedModelKey = resolveVideoModelKey(model, resolvedAspectRatio, resolvedTier, mode, duration);
+            logger.info(`[Video Generate] Model: ${model} [${mode}] -> Key: ${resolvedModelKey}`);
+        }
+
+        let result: any = null;
+        let usedBridge = false;
+
+        if (bridge && bridge.isConnected()) {
+            try {
+                if (mode === 'start_end') {
+                    result = await bridge.generateVideo({
+                        startImageMediaId,
+                        endImageMediaId,
+                        prompt: prompt.trim(),
+                        projectId,
+                        sceneId,
+                        aspectRatio: resolvedAspectRatio,
+                        userPaygateTier: resolvedTier,
+                        videoModelKey: resolvedModelKey,
+                    });
+                } else if (mode === 'start_image') {
+                    result = await bridge.generateVideo({
+                        startImageMediaId,
+                        prompt: prompt.trim(),
+                        projectId,
+                        sceneId,
+                        aspectRatio: resolvedAspectRatio,
+                        endImageMediaId,
+                        userPaygateTier: resolvedTier,
+                        videoModelKey: resolvedModelKey,
+                    });
+                } else {
+                    result = await bridge.generateVideoFromReferences({
+                        referenceMediaIds,
+                        prompt: prompt.trim(),
+                        projectId,
+                        sceneId,
+                        aspectRatio: resolvedAspectRatio,
+                        userPaygateTier: resolvedTier,
+                        videoModelKey: resolvedModelKey,
+                    });
+                }
+                usedBridge = true;
+            } catch (bridgeError: any) {
+                logger.warn('Extension bridge generateVideo failed for %s, falling back: %s', profileId, bridgeError.message);
+            }
+        }
+
+        if (!usedBridge) {
+            if (!flowClient || !flowClient.hasFlowKey()) {
+                return res.status(503).json({
+                    success: false,
+                    error: 'Flow client ch?a c? flowKey. Extension c?a profile n?y ch?a k?t n?i ho?c ch?a capture token.',
+                });
+            }
+            if (mode === 'start_end') {
+                result = await flowClient.generateVideo({
+                    startImageMediaId,
+                    endImageMediaId,
+                    prompt: prompt.trim(),
+                    projectId,
+                    sceneId,
+                    aspectRatio: resolvedAspectRatio,
+                    userPaygateTier: resolvedTier,
+                    videoModelKey: resolvedModelKey,
+                });
+            } else if (mode === 'start_image') {
+                result = await flowClient.generateVideo({
+                    startImageMediaId,
+                    prompt: prompt.trim(),
+                    projectId,
+                    sceneId,
+                    aspectRatio: resolvedAspectRatio,
+                    endImageMediaId,
+                    userPaygateTier: resolvedTier,
+                    videoModelKey: resolvedModelKey,
+                });
+            } else {
+                result = await flowClient.generateVideoFromReferences({
+                    referenceMediaIds,
+                    prompt: prompt.trim(),
+                    projectId,
+                    sceneId,
+                    aspectRatio: resolvedAspectRatio,
+                    userPaygateTier: resolvedTier,
+                    videoModelKey: resolvedModelKey,
+                });
+            }
+        }
+
+        // Extract workflows/operations từ API response
+        // API v3.1 trả về: { workflows: [{ name: "workflow-id", metadata: { primaryMediaId: "media-id" } }] }
+        // Extension trả về: { status, data: { workflows: [...] } }
+        // Bridge wraps it as: { result: { status, data: { workflows: [...] } } }
+        const rawData = result?.result?.data || result?.data || result || {};
+        const workflows = rawData.workflows || [];
+        const operations = rawData.operations || rawData.data?.operations || workflows;
+        
+        // Log detailed structure for debugging
+        logger.info(`[Video Generate] rawData keys: ${Object.keys(rawData).join(', ')}`);
+        logger.info(`[Video Generate] workflows[0]: ${JSON.stringify(workflows[0] || 'empty')}`);
+        logger.info(`[Video Generate] operations[0]: ${JSON.stringify(operations[0] || 'empty')}`);
+        
+        // Extract request IDs - có thể là workflow name hoặc operation name
+        const requestIds = (Array.isArray(operations) ? operations : [])
+            .map((op: any) => op?.name || op?.id || op?.mediaId || op)
+            .filter((id: any) => typeof id === 'string' && id);
+
+        // Extract media IDs từ workflows metadata
+        const mediaIds = (Array.isArray(workflows) ? workflows : [])
+            .map((wf: any) => wf?.metadata?.primaryMediaId || wf?.primaryMediaId || wf?.mediaId)
+            .filter((id: any) => typeof id === 'string' && id);
+
+        // Log only metadata, not full payloads
+        logger.info(`[Video Generate] Result - workflows: ${workflows.length}, operations: ${operations.length}, requestIds: ${requestIds.length}, mediaIds: ${mediaIds.length}`);
+        if (mediaIds.length > 0) {
+            logger.info(`[Video Generate] mediaIds[0]: ${mediaIds[0]}`);
+        } else {
+            logger.info(`[Video Generate] WARNING: No mediaIds extracted! rawData.workflows[0]: ${JSON.stringify(workflows[0] || 'empty').substring(0, 300)}`);
+        }
+        
+        // Check for errors in response
+        const responseError = rawData.error || rawData.errorInfo || rawData.status === 'error' ? rawData : null;
+        if (responseError) {
+            const errorMsg = responseError.error?.message || responseError.errorInfo?.message || JSON.stringify(responseError.error || responseError);
+            logger.error(`[Video Generate] API error: ${errorMsg}`);
+        }
+
+        res.json({
+            success: true,
+            data: {
+                profileId,
+                projectId,
+                sceneId,
+                mode,
+                model,
+                modelKey: resolvedModelKey,
+                aspectRatio: resolvedAspectRatio,
+                userPaygateTier: resolvedTier,
+                operations,
+                workflows,
+                requestIds,
+                mediaIds,
+                rawResult: result,
+            },
+            message: usedBridge ? 'Tạo video thành công qua Extension' : 'Tạo video thành công qua Flow API',
+        });
+    } catch (error: any) {
+        logger.error('Error generating Flow video:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * POST /flow/videos/upscale - Upscale an existing generated video.
+ * Body: { profileId, projectId, sceneId, mediaId, aspectRatio?, resolution? }
+ */
+router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
+    try {
+        const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
+        const flowRegistry = (req.app.locals as any).flowRegistry as FlowApiRegistry | undefined;
+        const db = req.app.locals.db as DatabaseManager;
+        const profileManager = new ProfileManager(db);
+
+        const {
+            profileId,
+            projectId,
+            sceneId,
+            mediaId,
+            aspectRatio,
+            resolution,
+        } = req.body || {};
+
+        if (!profileId || typeof profileId !== 'string') {
+            return res.status(400).json({ success: false, error: 'profileId is required' });
+        }
+        if (!projectId || typeof projectId !== 'string') {
+            return res.status(400).json({ success: false, error: 'projectId is required' });
+        }
+        if (!mediaId || typeof mediaId !== 'string') {
+            return res.status(400).json({ success: false, error: 'mediaId is required' });
+        }
+        if (!sceneId || typeof sceneId !== 'string') {
+            return res.status(400).json({ success: false, error: 'sceneId is required' });
+        }
+
+        const profile = profileManager.getProfile(profileId);
+        if (!profile) {
+            return res.status(404).json({ success: false, error: 'Profile not found' });
+        }
+
+        const resolvedAspectRatio = typeof aspectRatio === 'string' && aspectRatio.trim()
+            ? aspectRatio.trim()
+            : 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const resolvedResolution = typeof resolution === 'string' && resolution.trim()
+            ? resolution.trim()
+            : 'VIDEO_RESOLUTION_4K';
+
+        const bridge = extensionRegistry?.get(profileId);
+        const flowClient = flowRegistry?.getOrCreate(profileId);
+
+        let result: any = null;
+        let usedBridge = false;
+
+        if (bridge && bridge.isConnected()) {
+            try {
+                result = await bridge.upscaleVideo({
+                    mediaId,
+                    sceneId,
+                    aspectRatio: resolvedAspectRatio,
+                    resolution: resolvedResolution,
+                });
+                usedBridge = true;
+            } catch (bridgeError: any) {
+                logger.warn('Extension bridge upscaleVideo failed for %s, falling back: %s', profileId, bridgeError.message);
+            }
+        }
+
+        if (!usedBridge) {
+            if (!flowClient || !flowClient.hasFlowKey()) {
+                return res.status(503).json({
+                    success: false,
+                    error: 'Flow client ch?a c? flowKey. Extension c?a profile n?y ch?a k?t n?i ho?c ch?a capture token.',
+                });
+            }
+            result = await flowClient.upscaleVideo({
+                mediaId,
+                sceneId,
+                aspectRatio: resolvedAspectRatio,
+                resolution: resolvedResolution,
+            });
+        }
+
+        res.json({
+            success: true,
+            data: {
+                profileId,
+                projectId,
+                sceneId,
+                mediaId,
+                aspectRatio: resolvedAspectRatio,
+                resolution: resolvedResolution,
+                rawResult: result,
+            },
+            message: usedBridge ? 'Upscale video th?nh c?ng qua Extension' : 'Upscale video th?nh c?ng qua Flow API',
+        });
+    } catch (error: any) {
+        logger.error('Error upscaling Flow video:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * GET /flow/videos/download - Download video by mediaId
+ * Query: ?profileId=xxx&mediaId=xxx
+ */
+router.get('/flow/videos/download', async (req: Request, res: Response) => {
+    try {
+        const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
+
+        const { profileId, mediaId } = req.query as { profileId?: string; mediaId?: string };
+
+        if (!profileId || !mediaId) {
+            return res.status(400).json({ success: false, error: 'profileId and mediaId required' });
+        }
+
+        const bridge = extensionRegistry?.get(profileId as string);
+        if (!bridge || !bridge.isConnected()) {
+            return res.status(503).json({ success: false, error: 'Extension not connected' });
+        }
+
+        // === CALL GET /v1/media/{mediaId}?clientContext.tool=PINHOLE ===
+        // This is the EXACT same pattern as checkVideoStatus (api_request)
+        // - the extension fetches in the browser context using its own cookies.
+        const response = await bridge.getMedia(mediaId as string);
+
+        if (response?.error) {
+            return res.status(500).json({ success: false, error: response.error });
+        }
+
+        // Extract encodedVideo (base64) from response
+        // Handle both unwrapped and wrapped response formats
+        const rawResponse = response?.data || response || {};
+        const data = typeof rawResponse === 'object' ? rawResponse : {};
+        const videoObj = data.video || {};
+        const encodedVideo = videoObj.encodedVideo;
+        const fifeUrl = videoObj.fifeUrl || videoObj.servingBaseUri;
+
+        if (encodedVideo) {
+            // === Save base64 to MP4 file in data/videos/ (skip if already exists) ===
+            try {
+                const videosDir = path.join(process.cwd(), 'data', 'videos');
+                if (!fs.existsSync(videosDir)) {
+                    fs.mkdirSync(videosDir, { recursive: true });
+                }
+                const filename = `${mediaId}.mp4`;
+                const filepath = path.join(videosDir, filename);
+                if (fs.existsSync(filepath)) {
+                    // already saved, skip
+                } else {
+                    const videoBytes = Buffer.from(encodedVideo, 'base64');
+                    fs.writeFileSync(filepath, videoBytes);
+                    const sizeMB = (videoBytes.length / 1024 / 1024).toFixed(2);
+                    logger.info(`[Video Download] Saved MP4 (${sizeMB} MB) -> ${filename}`);
+                }
+            } catch (saveErr: any) {
+                logger.error(`[Video Download] Failed to save MP4 file: ${saveErr.message}`);
+            }
+
+            // Return base64 video data
+            return res.json({
+                success: true,
+                data: {
+                    mediaId,
+                    format: 'base64',
+                    encodedVideo,
+                    mimeType: 'video/mp4',
+                    savedPath: path.join(process.cwd(), 'data', 'videos', `${mediaId}.mp4`),
+                },
+            });
+        } else if (fifeUrl) {
+            // Return signed URL
+            return res.json({
+                success: true,
+                data: {
+                    mediaId,
+                    format: 'url',
+                    videoUrl: fifeUrl,
+                },
+            });
+        }
+
+        return res.status(404).json({ 
+            success: false, 
+            error: 'Video not ready or not found',
+            data,
+        });
+    } catch (error: any) {
+        logger.error('Error downloading video:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * POST /flow/videos/status - Check status of video generation operations
+ * Body: { profileId, operations?: string[], mediaIds?: string[] }
+ */
+router.post('/flow/videos/status', async (req: Request, res: Response) => {
+    try {
+        const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
+        const flowRegistry = (req.app.locals as any).flowRegistry as FlowApiRegistry | undefined;
+
+        const {
+            profileId,
+            projectId,
+            operations = [],
+            mediaIds = [],
+        } = req.body || {};
+
+        if (!profileId || typeof profileId !== 'string') {
+            return res.status(400).json({ success: false, error: 'profileId is required' });
+        }
+        if (!Array.isArray(operations) || !Array.isArray(mediaIds) || 
+            operations.length === 0 && mediaIds.length === 0) {
+            return res.status(400).json({ success: false, error: 'operations or mediaIds array is required' });
+        }
+
+        const bridge = extensionRegistry?.get(profileId);
+        const flowClient = flowRegistry?.getOrCreate(profileId);
+
+        let result: any = null;
+        let usedBridge = false;
+        let cachedResult = false;
+
+        // === SHORT-CIRCUIT: If every requested mediaId is already known to be SUCCESSFUL,
+        // skip batchCheckAsyncVideoGenerationStatus entirely. ===
+        const allMediaIds = mediaIds || [];
+        const cachedItems: any[] = [];
+        const uncachedMediaIds: string[] = [];
+        for (const mid of allMediaIds) {
+            const cacheKey = `${profileId}:${mid}`;
+            const cached = successfulMediaCache.get(cacheKey);
+            if (cached && Date.now() - cached.ts < SUCCESS_CACHE_TTL_MS) {
+                cachedItems.push(cached.mediaItem);
+            } else {
+                uncachedMediaIds.push(mid);
+            }
+        }
+        if (allMediaIds.length > 0 && cachedItems.length === allMediaIds.length) {
+            logger.info(`[Video Status] All ${allMediaIds.length} mediaIds already SUCCESSFUL (cached) - skipping batchCheck`);
+            result = { media: cachedItems };
+            usedBridge = true;
+            cachedResult = true;
+        }
+
+        if (!cachedResult && bridge && bridge.isConnected()) {
+            try {
+                // Pass operations, mediaIds, and projectId to bridge
+                // (only the uncached ones)
+                result = await bridge.checkVideoStatus({
+                    operations: operations.length > 0 ? operations : undefined,
+                    mediaIds: uncachedMediaIds.length > 0 ? uncachedMediaIds : (mediaIds.length > 0 ? mediaIds : undefined),
+                    projectId: projectId,
+                });
+                usedBridge = true;
+            } catch (bridgeError: any) {
+                logger.warn('Extension bridge checkVideoStatus failed for %s, falling back: %s', profileId, bridgeError.message);
+            }
+        }
+
+        if (!usedBridge) {
+            if (!flowClient || !flowClient.hasFlowKey()) {
+                return res.status(503).json({
+                    success: false,
+                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                });
+            }
+            result = await flowClient.checkVideoStatus(operations);
+        }
+
+        // Parse status response
+        const rawMedia = result?.media || result?.data?.media || [];
+        const rawOps = result?.operations || result?.data?.operations || [];
+
+        // Extract video URLs and status from media items
+        // Format: media[].mediaMetadata.mediaStatus.mediaGenerationStatus
+        //         media[].video.generatedVideo.fifeUrl
+        const completedVideos = [];
+        let hasActiveMedia = false;
+        let hasSuccessfulMedia = false;
+
+        for (const item of rawMedia) {
+            if (!item) continue;
+
+            // Check status - nested under mediaMetadata.mediaStatus.mediaGenerationStatus
+            const mediaMetadata = item?.mediaMetadata;
+            const mediaStatus = mediaMetadata?.mediaStatus;
+            const statusStr = mediaStatus?.mediaGenerationStatus || item?.status || '';
+            
+            // Also check video status
+            const videoStatus = item?.video?.status;
+
+            // Check if still processing
+            if (statusStr === 'MEDIA_GENERATION_STATUS_ACTIVE' || 
+                statusStr === 'MEDIA_GENERATION_STATUS_PENDING' ||
+                videoStatus === 'MEDIA_GENERATION_STATUS_ACTIVE' ||
+                videoStatus === 'MEDIA_GENERATION_STATUS_PENDING') {
+                hasActiveMedia = true;
+            }
+            
+            // Check if SUCCESSFUL - video is ready to download
+            if (statusStr === 'MEDIA_GENERATION_STATUS_SUCCESSFUL') {
+                hasSuccessfulMedia = true;
+                // Mark this mediaId as SUCCESSFUL in cache so subsequent polls
+                // skip batchCheckAsyncVideoGenerationStatus.
+                if (item.name) {
+                    const cacheKey = `${profileId}:${item.name}`;
+                    successfulMediaCache.set(cacheKey, {
+                        profileId,
+                        projectId: projectId || '',
+                        mediaItem: item,
+                        ts: Date.now(),
+                    });
+                }
+            }
+            
+            // Extract video URL from generatedVideo.fifeUrl
+            const generatedVideo = item?.video?.generatedVideo || {};
+            const videoObj = item?.video || {};
+            
+            // Try different URL locations
+            const fifeUrl = generatedVideo?.fifeUrl || videoObj?.fifeUrl;
+            const servingBaseUri = videoObj?.servingBaseUri;
+            
+            // If SUCCESSFUL or has URL, mark as completed
+            if (statusStr === 'MEDIA_GENERATION_STATUS_SUCCESSFUL' || fifeUrl) {
+                completedVideos.push({
+                    mediaId: item.name || item.mediaId,
+                    videoUrl: fifeUrl || null, // null means need to download
+                    status: statusStr,
+                    isReady: statusStr === 'MEDIA_GENERATION_STATUS_SUCCESSFUL',
+                    thumbnailUrl: generatedVideo?.poster?.fifeUrl || servingBaseUri || null,
+                    metadata: mediaMetadata,
+                    rawVideoData: generatedVideo,
+                });
+            }
+        }
+        
+        // Also check operations format
+        for (const item of rawOps) {
+            if (!item) continue;
+            const videoData = item.video || item.metadata?.video || {};
+            const generatedVideo = videoData.generatedVideo || {};
+            const fifeUrl = generatedVideo.fifeUrl || videoData.fifeUrl;
+            if (fifeUrl || item.status === 'SUCCESSFUL') {
+                completedVideos.push({
+                    mediaId: item.name || item.mediaId,
+                    videoUrl: fifeUrl || null,
+                    status: item.status || 'COMPLETED',
+                    isReady: item.status === 'SUCCESSFUL',
+                });
+            }
+        }
+        
+        // isComplete = has successful/ready videos and no active processing
+        const isComplete = (completedVideos.length > 0 || hasSuccessfulMedia) && !hasActiveMedia;
+
+        // === AUTO-PROBE: When isComplete is true, immediately call GET /v1/media/{mediaId}
+        // EXACT same pattern as checkVideoStatus - extension fetches via
+        // api_request using browser cookies (no Bearer header). ===
+        let autoDownloadResult: any = null;
+        if (isComplete && completedVideos.length > 0) {
+            try {
+                const firstVideo = completedVideos[0] as any;
+                const probeMediaId = firstVideo.mediaId;
+                if (bridge && bridge.isConnected() && probeMediaId) {
+                    // === SKIP probe if MP4 already saved locally ===
+                    const existingPath = path.join(process.cwd(), 'data', 'videos', `${probeMediaId}.mp4`);
+                    if (fs.existsSync(existingPath)) {
+                        const stat = fs.statSync(existingPath);
+                        logger.info(`[Video Status] MP4 already saved: ${existingPath} (${(stat.size/1024/1024).toFixed(2)} MB)`);
+                        autoDownloadResult = {
+                            mediaId: probeMediaId,
+                            success: true,
+                            savedPath: existingPath,
+                            alreadySaved: true,
+                        };
+                    } else {
+                    logger.info(`[Video Status] AUTO-PROBE: GET /v1/media/${probeMediaId}`);
+                    const probeResp = await bridge.getMedia(probeMediaId);
+                    const rawData = probeResp?.data || probeResp || {};
+                    const videoObj = rawData.video || {};
+                    autoDownloadResult = {
+                        mediaId: probeMediaId,
+                        success: !!videoObj.encodedVideo || !!(videoObj.fifeUrl || videoObj.servingBaseUri),
+                        hasEncodedVideo: !!videoObj.encodedVideo,
+                        encodedVideoLength: videoObj.encodedVideo?.length || 0,
+                        hasFifeUrl: !!(videoObj.fifeUrl || videoObj.servingBaseUri),
+                    };
+
+                    // === AUTO-SAVE: If encodedVideo present, save to data/videos/ ===
+                    if (videoObj.encodedVideo) {
+                        try {
+                            const videosDir = path.join(process.cwd(), 'data', 'videos');
+                            if (!fs.existsSync(videosDir)) {
+                                fs.mkdirSync(videosDir, { recursive: true });
+                            }
+                            const filepath = path.join(videosDir, `${probeMediaId}.mp4`);
+                            const videoBytes = Buffer.from(videoObj.encodedVideo, 'base64');
+                            fs.writeFileSync(filepath, videoBytes);
+                            const sizeMB = (videoBytes.length / 1024 / 1024).toFixed(2);
+                            logger.info(`[Video Status] AUTO-PROBE: Saved MP4 (${sizeMB} MB)`);
+                            if (autoDownloadResult) autoDownloadResult.savedPath = filepath;
+                        } catch (saveErr: any) {
+                            logger.error(`[Video Status] AUTO-PROBE save failed: ${saveErr.message}`);
+                        }
+                    }
+                    } // close else (no existingPath)
+                }
+            } catch (probeErr: any) {
+                logger.error(`[Video Status] AUTO-PROBE error: ${probeErr.message}`);
+            }
+        }
+
+        res.json({
+            success: true,
+            data: {
+                profileId,
+                projectId,
+                operations: rawOps,
+                mediaIds,
+                status: result,
+                media: rawMedia,
+                completedVideos,
+                isComplete,
+                hasActiveMedia,
+                hasSuccessfulMedia,
+                autoDownloadResult, // <-- AUTO-PROBE result included
+                shouldStopPolling: isComplete, // <-- Frontend should stop polling
+                stopReason: isComplete ? 'Video generation completed (SUCCESSFUL)' : null,
+            },
+            message: usedBridge ? 'Kiểm tra trạng thái qua Extension' : 'Kiểm tra trạng thái qua Flow API',
+        });
+    } catch (error: any) {
+        logger.error('Error checking Flow video status:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});

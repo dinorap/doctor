@@ -260,88 +260,230 @@ export class ExtensionBridge extends EventEmitter {
             normalized = response.data;
         }
 
-        // If the response contains an unrecognized tier value, strip it
-        // out of the returned payload so callers never see a fake tier.
-        if (normalized && typeof normalized === 'object' && normalized.userPaygateTier !== undefined) {
-            if (normalized.userPaygateTier !== 'PAYGATE_TIER_ONE' && normalized.userPaygateTier !== 'PAYGATE_TIER_TWO') {
-                const { userPaygateTier: _drop, ...rest } = normalized;
-                normalized = rest;
+        return {
+            credits: typeof normalized?.credits === 'number' ? normalized.credits : null,
+            userPaygateTier: typeof normalized?.userPaygateTier === 'string' ? normalized.userPaygateTier : null,
+        };
+    }
+
+    public async getStatusWithDetails(): Promise<any> {
+        return this.sendRequest('get_status', {});
+    }
+
+    public async getSession(): Promise<any> {
+        return this.sendRequest('get_session', {});
+    }
+
+    public async apiRequest<T = any>(payload: {
+        url: string;
+        method?: string;
+        headers?: Record<string, string>;
+        body?: any;
+        captchaAction?: string;
+    }): Promise<T> {
+        const response = await this.sendRequest<any>('api_request', {
+            url: payload.url,
+            method: payload.method || 'GET',
+            headers: payload.headers,
+            body: payload.body,
+            captchaAction: payload.captchaAction,
+        });
+
+        if (typeof response === 'string') {
+            return JSON.parse(response) as T;
+        }
+
+        return response as T;
+    }
+
+    public async getActiveProject(): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/project.getActiveProject',
+            method: 'GET',
+        });
+
+        return response;
+    }
+
+    public async getActiveScene(): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/scene.getActiveScene',
+            method: 'GET',
+        });
+
+        return response;
+    }
+
+    public async getActiveVideo(): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/video.getActiveVideo',
+            method: 'GET',
+        });
+
+        return response;
+    }
+
+    public async getMediaList(projectId: string, sceneId: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/media.list',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                    sceneId,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async getMediaDetails(projectId: string, sceneId: string, mediaId: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/media.get',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                    sceneId,
+                    mediaId,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async getMediaDownloadLink(projectId: string, sceneId: string, mediaId: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/media.download',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                    sceneId,
+                    mediaId,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async uploadImage(params: {
+        projectId: string;
+        sceneId?: string;
+        filePath?: string;
+        fileName?: string;
+        fileData?: string; // base64 encoded data
+        mimeType?: string;
+    }): Promise<any> {
+        let base64Data = params.fileData;
+        
+        // If filePath is provided but no base64, read from disk (server-side only)
+        if (!base64Data && params.filePath) {
+            if (typeof require !== 'undefined') {
+                try {
+                    const fs = require('fs');
+                    const fileBuffer = fs.readFileSync(params.filePath);
+                    base64Data = fileBuffer.toString('base64');
+                } catch (e) {
+                    logger.warn('[ExtensionBridge] Cannot read file from path, expecting base64 data');
+                }
             }
         }
 
-        if (normalized && typeof normalized === 'object') {
-            // Only accept a recognized tier; keep current value otherwise.
-            const rawTier = normalized.userPaygateTier;
-            const acceptedTier = (rawTier === 'PAYGATE_TIER_ONE' || rawTier === 'PAYGATE_TIER_TWO')
-                ? rawTier
-                : this.status.tier;
-            this.updateStatus({
-                credits: typeof normalized.credits === 'number' ? normalized.credits : this.status.credits,
-                tier: acceptedTier,
-                flowKeyPresent: true,
-            });
+        if (!base64Data) {
+            throw new Error('uploadImage requires either filePath or fileData');
         }
 
-        return normalized;
+        const fileName = params.fileName || 'upload.png';
+        const mimeType = params.mimeType || 'image/jpeg';
+
+        // Match Python API: /v1/flow/uploadImage
+        const response = await this.sendRequest('api_request', {
+            url: 'https://aisandbox-pa.googleapis.com/v1/flow/uploadImage',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: {
+                clientContext: {
+                    projectId: params.projectId,
+                    tool: 'PINHOLE',
+                    sessionId: `;${Date.now()}`,
+                },
+                fileName,
+                imageBytes: base64Data,
+                mimeType,
+                isHidden: false,
+                isUserUploaded: true,
+            },
+            captchaAction: 'IMAGE_UPLOAD',
+        });
+
+        // Extract media ID from response
+        // Response: { media: { name: "uuid" } }
+        if (response && !response.error) {
+            const media = response.media || (response.data && response.data.media);
+            if (media?.name) {
+                response._mediaId = media.name;
+            }
+        }
+
+        return response;
     }
 
     public async generateImages(params: {
         projectId: string;
-        prompt?: string;
-        aspectRatio?: string;
-        userPaygateTier?: string;
+        sceneId: string;
+        prompt: string;
         modelKey?: string;
-        characterMediaIds?: string[];
+        aspectRatio?: string;
+        numberOfImages?: number;
+        userPaygateTier?: string;
     }): Promise<any> {
-        const seed = Math.floor(Math.random() * 294967296);
-        const requests = [
-            {
-                clientContext: {
-                    recaptchaContext: {
-                        token: '',
-                        applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
-                    },
-                    sessionId: '',
-                    projectId: params.projectId,
-                    tool: 'PINHOLE',
-                },
-                imageAspectRatio: params.aspectRatio || 'IMAGE_ASPECT_RATIO_LANDSCAPE',
-                seed,
-                imageModelName: params.modelKey || 'GEM_PIX_2',
-                prompt: params.prompt || '',
-                imageInputs: [],
-            },
-        ];
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
+        const numberOfImages = params.numberOfImages || 4;
 
-        if (params.characterMediaIds && params.characterMediaIds.length) {
-            requests[0].imageInputs = params.characterMediaIds.map((id) => ({
-                imageInputType: 'IMAGE_INPUT_TYPE_REFERENCE',
-                name: id,
-            }));
-        }
-
-        const body = {
-            clientContext: {
-                recaptchaContext: {
-                    token: '',
-                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+        const request: any = {
+            aspectRatio,
+            seed: Math.floor(Date.now() / 1000) % 10000,
+            textInput: {
+                structuredPrompt: {
+                    parts: [{ text: params.prompt }],
                 },
-                sessionId: '',
-                projectId: params.projectId,
-                tool: 'PINHOLE',
             },
-            mediaGenerationContext: {
-                batchId: crypto.randomUUID(),
-            },
-            useNewMedia: true,
-            requests,
+            sampleCount: numberOfImages,
         };
 
-        logger.info('[Entity Gen] Request body: %s', JSON.stringify(body));
+        const body: any = {
+            mediaGenerationContext: { batchId: crypto.randomUUID() },
+            clientContext: {
+                recaptchaContext: {
+                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                    token: '',
+                },
+                projectId: params.projectId,
+                tool: 'PINHOLE',
+                userPaygateTier,
+                sessionId: `;${Date.now()}`,
+            },
+            requests: [request],
+            useV2ModelConfig: true,
+        };
+
+        if (params.modelKey) {
+            body.modelKey = params.modelKey;
+        }
 
         const response: any = await this.sendRequest('api_request', {
-            url: 'https://aisandbox-pa.googleapis.com/v1/projects/' + params.projectId + '/flowMedia:batchGenerateImages',
+            url: 'https://aisandbox-pa.googleapis.com/v1/image:batchAsyncGenerateImages',
             method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
             body,
             captchaAction: 'IMAGE_GENERATION',
         });
@@ -353,60 +495,450 @@ export class ExtensionBridge extends EventEmitter {
         return response?.data ?? response;
     }
 
-    public async upscaleImage(params: {
-        mediaId: string;
-        targetResolution: string;
-        projectId?: string;
+    public async generateVideo(params: {
+        startImageMediaId?: string;
+        prompt: string;
+        projectId: string;
+        sceneId: string;
+        aspectRatio?: string;
+        endImageMediaId?: string;
+        userPaygateTier?: string;
+        videoModelKey?: string;
     }): Promise<any> {
-        // Use longer timeout for 4K upscale
-        const is4K = params.targetResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K';
-        const savedTimeout = this.timeoutMs;
-        if (is4K) {
-            this.timeoutMs = 180000; // 3 min for 4K
-        }
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
+        const hasStartImage = params.startImageMediaId && params.startImageMediaId.trim();
+        const hasEndImage = params.endImageMediaId && params.endImageMediaId.trim();
+        const useStartEnd = hasStartImage && hasEndImage;
+        const useStartImage = hasStartImage && !hasEndImage;
 
-        try {
-            const body = {
-                mediaId: params.mediaId,
-                targetResolution: params.targetResolution,
-                clientContext: {
-                    recaptchaContext: {
-                        applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
-                        token: '',
-                    },
-                    projectId: params.projectId || '',
-                    tool: 'PINHOLE',
-                    userPaygateTier: 'PAYGATE_TIER_TWO',
-                    sessionId: crypto.randomUUID(),
+        const request: any = {
+            aspectRatio,
+            seed: Math.floor(Date.now() / 1000) % 10000,
+            textInput: {
+                structuredPrompt: {
+                    parts: [{ text: params.prompt }],
                 },
-            };
+            },
+            metadata: { sceneId: params.sceneId },
+        };
 
-            logger.info('[Image Upscale] Request body: %s', JSON.stringify(body));
-
-            const response: any = await this.sendRequest('upscaleImage', body);
-
-            if (response?.error) {
-                throw new Error(response.error);
-            }
-
-            return response?.data ?? response;
-        } finally {
-            this.timeoutMs = savedTimeout;
+        // Chỉ thêm startImage khi có mediaId thực
+        if (useStartImage) {
+            request.startImage = { mediaId: params.startImageMediaId };
+        } else if (useStartEnd) {
+            request.startImage = { mediaId: params.startImageMediaId };
+            request.endImage = { mediaId: params.endImageMediaId };
         }
+
+        if (params.videoModelKey) {
+            request.videoModelKey = params.videoModelKey;
+        }
+
+        const body: any = {
+            mediaGenerationContext: {
+                batchId: crypto.randomUUID(),
+                audioFailurePreference: 'BLOCK_SILENCED_VIDEOS',
+            },
+            clientContext: {
+                recaptchaContext: {
+                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                    token: '',
+                },
+                projectId: params.projectId,
+                tool: 'PINHOLE',
+                userPaygateTier,
+                sessionId: `;${Date.now()}`,
+            },
+            requests: [request],
+            useV2ModelConfig: true,
+        };
+
+        // Chọn endpoint đúng dựa trên loại video
+        let url: string;
+        if (useStartEnd) {
+            url = 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartAndEndImage';
+        } else if (useStartImage) {
+            url = 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoStartImage';
+        } else {
+            // Pure T2V - text to video không có image
+            url = 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoText';
+        }
+
+        const response: any = await this.sendRequest('api_request', {
+            url,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body,
+            captchaAction: 'VIDEO_GENERATION',
+        });
+
+        if (response?.error) {
+            throw new Error(response.error);
+        }
+
+        return response?.data ?? response;
     }
 
-    public dispose(): void {
-        // Reject any in-flight requests so promises don't hang
-        for (const [, entry] of this.pending) {
+    public async generateVideoFromReferences(params: {
+        referenceMediaIds: string[];
+        prompt: string;
+        projectId: string;
+        sceneId: string;
+        aspectRatio?: string;
+        userPaygateTier?: string;
+        videoModelKey?: string;
+    }): Promise<any> {
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
+
+        const request: any = {
+            aspectRatio,
+            seed: Math.floor(Date.now() / 1000) % 10000,
+            textInput: {
+                structuredPrompt: {
+                    parts: [{ text: params.prompt }],
+                },
+            },
+            referenceImages: params.referenceMediaIds.map((mediaId) => ({
+                mediaId,
+                imageUsageType: 'IMAGE_USAGE_TYPE_ASSET',
+            })),
+            metadata: {},
+        };
+
+        if (params.videoModelKey) {
+            request.videoModelKey = params.videoModelKey;
+        }
+
+        const body: any = {
+            mediaGenerationContext: {
+                batchId: crypto.randomUUID(),
+                audioFailurePreference: 'BLOCK_SILENCED_VIDEOS',
+            },
+            clientContext: {
+                recaptchaContext: {
+                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                    token: '',
+                },
+                projectId: params.projectId,
+                tool: 'PINHOLE',
+                userPaygateTier,
+                sessionId: `;${Date.now()}`,
+            },
+            requests: [request],
+            useV2ModelConfig: true,
+        };
+
+        const response: any = await this.sendRequest('api_request', {
+            url: 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body,
+            captchaAction: 'VIDEO_GENERATION',
+        });
+
+        if (response?.error) {
+            throw new Error(response.error);
+        }
+
+        return response?.data ?? response;
+    }
+
+    public async upscaleVideo(params: {
+        mediaId: string;
+        sceneId: string;
+        aspectRatio?: string;
+        resolution?: string;
+    }): Promise<any> {
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const resolution = params.resolution || 'VIDEO_RESOLUTION_4K';
+
+        const body: any = {
+            mediaGenerationContext: { batchId: crypto.randomUUID() },
+            clientContext: {
+                recaptchaContext: {
+                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                    token: '',
+                },
+                tool: 'PINHOLE',
+                userPaygateTier: 'PAYGATE_TIER_TWO',
+                sessionId: `;${Date.now()}`,
+            },
+            mediaId: params.mediaId,
+            sceneId: params.sceneId,
+            aspectRatio,
+            resolution,
+        };
+
+        const response: any = await this.sendRequest('api_request', {
+            url: 'https://aisandbox-pa.googleapis.com/v1/video:upscale',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body,
+            captchaAction: 'VIDEO_UPSCALE',
+        });
+
+        if (response?.error) {
+            throw new Error(response.error);
+        }
+
+        return response?.data ?? response;
+    }
+
+    /**
+     * Check video generation status
+     * Supports both operation-based (old) and media-based (v3.1) APIs
+     * For reference video, media-based API may 404 → fallback to operations
+     */
+    public async checkVideoStatus(params: {
+        operations?: string[];
+        mediaIds?: string[];
+        projectId?: string;
+    }): Promise<any> {
+        const { operations = [], mediaIds = [], projectId } = params;
+        
+        // Use video:batchCheckAsyncVideoGenerationStatus endpoint
+        // Request format: { media: [{ name: "mediaId", projectId: "projectId" }] }
+        if (mediaIds.length > 0) {
+            const response = await this.sendRequest('api_request', {
+                url: 'https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: {
+                    media: mediaIds.map(id => ({
+                        name: id,
+                        ...(projectId ? { projectId } : {}),
+                    })),
+                },
+            });
+            logger.info(`[checkVideoStatus] mediaIds=${mediaIds.length} responseStatus=${response?.status || response?.data?.status || 'unknown'}`);
+            return response;
+        }
+        
+        // Fallback to operations format if no mediaIds
+        if (operations.length > 0) {
+            const response = await this.sendRequest('api_request', {
+                url: 'https://aisandbox-pa.googleapis.com/v1/video:batchCheckAsyncVideoGenerationStatus',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: {
+                    operations: operations.map(op => ({ 
+                        operation: { name: op } 
+                    })),
+                },
+            });
+            logger.info(`[checkVideoStatus] operations=${operations.length} responseStatus=${response?.status || response?.data?.status || 'unknown'}`);
+            return response;
+        }
+        
+        return { media: [], operations: [] };
+    }
+
+    private async checkViaOperations(operations: string[]): Promise<any> {
+        // Poll each operation individually using getOperation endpoint
+        const results = [];
+        for (const opName of operations) {
+            if (!opName) continue;
             try {
-                clearTimeout(entry.timer);
-                entry.reject(new Error(`ExtensionBridge for profile ${this.profileId} disposed`));
+                const opResult = await this.getOperation(opName);
+                results.push(opResult);
             } catch (e) {
-                logger.warn('Failed to reject pending request on dispose: %s', e);
+                logger.warn(`[checkViaOperations] Failed to get operation ${opName}: ${e}`);
             }
         }
-        this.pending.clear();
-        this.setWebSocket(null);
-        this.removeAllListeners();
+        // Return as operations array for consistent parsing
+        return { operations: results };
+    }
+    
+    /**
+     * Get operation details (for download after completion)
+     */
+    public async getOperation(operationName: string): Promise<any> {
+        const response = await this.sendRequest('api_request', {
+            url: `https://aisandbox-pa.googleapis.com/v1/${operationName}`,
+            method: 'GET',
+            headers: {
+                'Authorization': 'Bearer ...', // Will be filled by sendRequest
+            },
+        });
+        return response;
+    }
+
+    public async listProjects(): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/project.list',
+            method: 'GET',
+        });
+
+        return response;
+    }
+
+    public async listScenes(projectId: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/scene.list',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async createScene(projectId: string, sceneTitle?: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/scene.createScene',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                    sceneTitle: sceneTitle || 'Scene',
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async deleteScene(projectId: string, sceneId: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/scene.deleteScene',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                    sceneId,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async renameScene(projectId: string, sceneId: string, newTitle: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/scene.updateScene',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                    sceneId,
+                    title: newTitle,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async deleteMedia(projectId: string, sceneId: string, mediaId: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/media.delete',
+            method: 'POST',
+            body: {
+                json: {
+                    projectId,
+                    sceneId,
+                    mediaId,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    public async getMediaStatus(mediaId: string): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/media.getStatus',
+            method: 'POST',
+            body: {
+                json: {
+                    mediaId,
+                },
+            },
+        });
+
+        return response;
+    }
+
+    /**
+     * Get media details via trpc (uses browser cookies automatically).
+     * POST /api/trpc/media.get
+     * Fallback option if direct GET fails. The browser does not have a Bearer
+     * token, so this route is more reliable.
+     */
+    public async getMediaTrpc(mediaId: string, projectId?: string, sceneId?: string): Promise<any> {
+        const body: any = { json: { mediaId } };
+        if (projectId) body.json.projectId = projectId;
+        if (sceneId) body.json.sceneId = sceneId;
+
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/media.get',
+            method: 'POST',
+            body,
+        });
+        return response;
+    }
+
+    /**
+     * Direct GET /v1/media/{id}?clientContext.tool=PINHOLE
+     * Same pattern as api_request (checkVideoStatus) - the extension fetches
+     * in the browser context using its own cookies. Do NOT send an
+     * Authorization header because the browser does NOT have a Bearer token.
+     */
+    public async getMedia(mediaId: string): Promise<any> {
+        const response = await this.sendRequest('api_request', {
+            url: `https://aisandbox-pa.googleapis.com/v1/media/${mediaId}?clientContext.tool=PINHOLE`,
+            method: 'GET',
+        });
+        return response;
+    }
+
+    /**
+     * trpc variant (kept as fallback). Some media may only be reachable
+     * via the trpc media.get endpoint.
+     */
+
+    public async getTierStatus(): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/user.getTierStatus',
+            method: 'GET',
+        });
+
+        return response;
+    }
+
+    public async getUserProfile(): Promise<any> {
+        const response = await this.sendRequest('trpc_request', {
+            url: 'https://labs.google/fx/api/trpc/user.getProfile',
+            method: 'GET',
+        });
+
+        return response;
+    }
+
+    public close(): void {
+        if (this.ws) {
+            try {
+                this.ws.close();
+            } catch {
+                // ignore
+            }
+            this.ws = null;
+        }
+        this.updateStatus({ connected: false, state: 'off' });
     }
 }

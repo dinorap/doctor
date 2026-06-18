@@ -28,6 +28,10 @@ const flowRegistry = new FlowApiRegistry({
     timeoutMs: 10000,
 });
 
+// Debounce map to prevent rapid-fire getCredits calls per profile
+const getCreditsDebounce = new Map<string, number>();
+const GET_CREDITS_COOLDOWN_MS = 2000;
+
 // WebSocket for real-time updates (frontend events)
 const WebSocket = require('ws');
 const wss = new WebSocket.Server({ server });
@@ -156,7 +160,11 @@ async function handleExtensionMessage(
         // API calls, not our `getCredits` request. Kick this off once per
         // new-token event so the dashboard tier flips to Pro/Ultra instead
         // of staying on Unknown.
-        if (bridge && bridge.isConnected()) {
+        // Debounce to prevent rapid-fire calls when extension sends multiple token_captured messages.
+        const now = Date.now();
+        const lastCall = getCreditsDebounce.get(messageProfileId) || 0;
+        if (bridge && bridge.isConnected() && (now - lastCall) > GET_CREDITS_COOLDOWN_MS) {
+            getCreditsDebounce.set(messageProfileId, now);
             bridge.getCredits()
                 .then((creditsData) => {
                     const rawTier = creditsData?.userPaygateTier;
@@ -370,10 +378,10 @@ server.listen(PORT, () => {
     logger.info(`
 ╔═══════════════════════════════════════════════════════════╗
 ║  Chromium Profile Manager Server                          ║
-║  Server running at: http://${HOST}:${PORT}              ║
+║  Server running at: http://${HOST}:${PORT}                ║
 ║  WebSocket: ws://${HOST}:${PORT}                          ║
-║  Extension WS: ws://${HOST}:${CONFIG.extension?.wsPort || 9222}                  ║
-║  Extension Callback: http://${HOST}:${PORT}/api/ext/callback                  ║
+║  Extension WS: ws://${HOST}:${CONFIG.extension?.wsPort || 9222}║
+║  Extension Callback: http://${HOST}:${PORT}/api/ext/callback║
 ║  API Endpoints:                                           ║
 ║    GET  /api/health                                       ║
 ║    GET  /api/profiles                                     ║

@@ -310,6 +310,7 @@ export function useEntities() {
         modelKey?: string;
         aspectRatio?: string;
         upscaleResolution?: string;
+        entityTypePrompt?: string;
     }) => {
         setGenerating(true);
         setError(null);
@@ -328,6 +329,7 @@ export function useEntities() {
                     modelKey: data.modelKey,
                     aspectRatio: data.aspectRatio,
                     upscaleResolution: data.upscaleResolution,
+                    entityTypePrompt: data.entityTypePrompt,
                 }),
             });
             const response = await res.json();

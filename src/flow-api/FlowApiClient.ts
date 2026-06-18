@@ -228,6 +228,154 @@ export class FlowApiClient extends EventEmitter {
         return this.sendRequest<any>('generateImages', body);
     }
 
+    public async uploadImage(imageBase64: string, mimeType: string, projectId: string, fileName: string): Promise<any> {
+        this.ensureFlowKey();
+        const body: Record<string, any> = {
+            flowKey: this.flowKey as string,
+            projectId,
+            fileName,
+            imageBytes: imageBase64,
+            mimeType,
+            isHidden: false,
+            isUserUploaded: true,
+        };
+
+        return this.sendRequest<any>('uploadImage', body);
+    }
+
+    public async generateVideo(params: {
+        startImageMediaId?: string;
+        prompt: string;
+        projectId: string;
+        sceneId: string;
+        aspectRatio?: string;
+        endImageMediaId?: string;
+        userPaygateTier?: PaygateTier;
+        videoModelKey?: string;
+    }): Promise<any> {
+        this.ensureFlowKey();
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
+        const hasStartImage = params.startImageMediaId && params.startImageMediaId.trim();
+        const hasEndImage = params.endImageMediaId && params.endImageMediaId.trim();
+        const useStartEnd = hasStartImage && hasEndImage;
+        const useStartImage = hasStartImage && !hasEndImage;
+
+        const request: Record<string, any> = {
+            aspectRatio,
+            seed: Math.floor(Date.now() / 1000) % 10000,
+            textInput: {
+                structuredPrompt: {
+                    parts: [{ text: params.prompt }],
+                },
+            },
+            metadata: { sceneId: params.sceneId },
+        };
+
+        // Chỉ thêm startImage/endImage khi có mediaId thực
+        if (useStartImage) {
+            request.startImage = { mediaId: params.startImageMediaId };
+        } else if (useStartEnd) {
+            request.startImage = { mediaId: params.startImageMediaId };
+            request.endImage = { mediaId: params.endImageMediaId };
+        }
+
+        if (params.videoModelKey) {
+            request.videoModelKey = params.videoModelKey;
+        }
+
+        const body: Record<string, any> = {
+            flowKey: this.flowKey as string,
+            projectId: params.projectId,
+            userPaygateTier,
+            mediaGenerationContext: {
+                batchId: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+                audioFailurePreference: 'BLOCK_SILENCED_VIDEOS',
+            },
+            requests: [request],
+            useV2ModelConfig: true,
+        };
+
+        const method = useStartEnd ? 'generateVideoStartEnd' : useStartImage ? 'generateVideo' : 'generateTextToVideo';
+        return this.sendRequest<any>(method, body);
+    }
+
+    public async generateVideoFromReferences(params: {
+        referenceMediaIds: string[];
+        prompt: string;
+        projectId: string;
+        sceneId: string;
+        aspectRatio?: string;
+        userPaygateTier?: PaygateTier;
+        videoModelKey?: string;
+    }): Promise<any> {
+        this.ensureFlowKey();
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
+
+        const request: Record<string, any> = {
+            aspectRatio,
+            seed: Math.floor(Date.now() / 1000) % 10000,
+            textInput: {
+                structuredPrompt: {
+                    parts: [{ text: params.prompt }],
+                },
+            },
+            referenceImages: params.referenceMediaIds.map((mediaId) => ({
+                mediaId,
+                imageUsageType: 'IMAGE_USAGE_TYPE_ASSET',
+            })),
+            metadata: {},
+        };
+
+        if (params.videoModelKey) {
+            request.videoModelKey = params.videoModelKey;
+        }
+
+        const body: Record<string, any> = {
+            flowKey: this.flowKey as string,
+            projectId: params.projectId,
+            userPaygateTier,
+            mediaGenerationContext: {
+                batchId: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+                audioFailurePreference: 'BLOCK_SILENCED_VIDEOS',
+            },
+            requests: [request],
+            useV2ModelConfig: true,
+        };
+
+        return this.sendRequest<any>('generateVideoFromReferences', body);
+    }
+
+    public async upscaleVideo(params: {
+        mediaId: string;
+        sceneId: string;
+        aspectRatio?: string;
+        resolution?: string;
+    }): Promise<any> {
+        this.ensureFlowKey();
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const resolution = params.resolution || 'VIDEO_RESOLUTION_4K';
+
+        const body: Record<string, any> = {
+            flowKey: this.flowKey as string,
+            mediaId: params.mediaId,
+            sceneId: params.sceneId,
+            aspectRatio,
+            resolution,
+        };
+
+        return this.sendRequest<any>('upscaleVideo', body);
+    }
+
+    public async checkVideoStatus(operations: any[]): Promise<any> {
+        this.ensureFlowKey();
+        return this.sendRequest<any>('checkVideoStatus', {
+            flowKey: this.flowKey as string,
+            operations,
+        });
+    }
+
     public setFlowKey(flowKey: string): void {
         this.flowKey = flowKey;
         this.emit('flowKeyChanged', flowKey);

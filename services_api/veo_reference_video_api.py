@@ -430,16 +430,33 @@ async def request_check_reference_status_via_browser(
     access_token: str,
 ) -> Dict[str, Any]:
     """
-    Check status reference video. Payload media[] → endpoint media: (v3.1+).
+    Check status reference video. 
+    - Nếu payload có operations[] → dùng operation polling endpoint (chính xác nhất)
+    - Nếu payload có media[] → thử /v1/media:batchCheckAsyncVideoGenerationStatus
+      (endpoint này có thể 404 cho reference video, nên fallback sang operation)
     """
     from services_api.veo_video_api import URL_STATUS_MEDIA_BATCH
 
+    # Ưu tiên operations[] → poll qua operation endpoint
+    if isinstance(payload.get("operations"), list) and payload.get("operations"):
+        ops = payload["operations"]
+        for op in ops:
+            if isinstance(op, dict) and op.get("name"):
+                return await request_get_operation_via_browser(
+                    page, op["name"], access_token
+                )
+
+    # Thử media[] với endpoint /v1/media:... trước
     if isinstance(payload.get("media"), list) and payload.get("media"):
         res = await _send_request_via_browser(
             page, URL_STATUS_MEDIA_BATCH, payload, access_token
         )
-        if res.get("ok"):
+        if res.get("ok") and res.get("status") == 200:
             return res
+        # Nếu 404 hoặc fail → fallback sang operation polling
+        # (response từ generate thường có operation.name để poll)
+
+    # Fallback: thử operations[] endpoint cũ
     return await _send_request_via_browser(
         page,
         URL_STATUS_REFERENCE_VIDEO,

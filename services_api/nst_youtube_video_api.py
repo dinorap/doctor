@@ -1598,33 +1598,17 @@ async def generate_youtube_videos_via_api_for_page(
                         break
                     print(
                         f"[VEO Video API] [{ptag}] ⚠️ scene={scene_id} upscale fail → "
-                        "fallback tải encodedVideo gốc (720)…"
+                        "fallback tải encodedVideo gốc (720) sau 3 retry nhanh…"
                     )
-                    ok_enc, rel_path, thumb_rel = await _fetch_encoded_video_and_save(
-                        page,
-                        profile_id=profile_id,
-                        access_token=access_token,
-                        media_id=identifier,
-                        scene_id=scene_id,
-                        script_path=script_path,
-                        script_name=script_name,
-                        videos_output_dir=videos_output_dir,
-                        ptag=ptag,
-                    )
-                    if ok_enc and rel_path:
-                        results[job_id] = {
-                            "ok": True,
-                            "scene_id": scene_id,
-                            "video_path": rel_path,
-                            "thumbnail_path": thumb_rel,
-                            "download_url": "encoded_video_720_fallback",
-                        }
-                        break
                 else:
                     print(
                         f"[VEO Video API] [{ptag}] ✅ scene={scene_id} status=SUCCESSFUL, "
-                        "lấy encodedVideo (pool retry)..."
+                        "tải encodedVideo ngay (retry nhanh 3 lần)…"
                     )
+
+                # Retry nhanh download encodedVideo (3 lần, mỗi lần đợi 2s)
+                ok_enc, rel_path, thumb_rel = False, None, None
+                for dl_attempt in range(3):
                     ok_enc, rel_path, thumb_rel = await _fetch_encoded_video_and_save(
                         page,
                         profile_id=profile_id,
@@ -1644,8 +1628,21 @@ async def generate_youtube_videos_via_api_for_page(
                             "thumbnail_path": thumb_rel,
                             "download_url": "encoded_video",
                         }
+                        print(
+                            f"[VEO Video API] [{ptag}] ✅ scene={scene_id} encodedVideo OK "
+                            f"(attempt {dl_attempt + 1}/3) → {rel_path}"
+                        )
                         break
+                    print(
+                        f"[VEO Video API] [{ptag}] ℹ️ scene={scene_id} encodedVideo chưa ready "
+                        f"(attempt {dl_attempt + 1}/3), retry sau 2s…"
+                    )
+                    await _wait_with_stop(2.0)
 
+                if ok_enc and rel_path:
+                    break
+
+                # Fallback: thử lấy fifeUrl từ response status (nếu có)
                 v_url, img_url = _extract_urls_from_status_item(matched_op)
                 if v_url:
                     final_video_url = v_url
@@ -1655,6 +1652,7 @@ async def generate_youtube_videos_via_api_for_page(
                     )
                     break
 
+                # Nếu vẫn không có gì, tiếp tục poll (encodedVideo có thể cần thêm thời gian)
                 print(
                     f"[VEO Video API] [{ptag}] ℹ️ scene={scene_id} SUCCESSFUL nhưng chưa có file — "
                     "tiếp tục poll..."

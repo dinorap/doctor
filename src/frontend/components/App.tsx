@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useProfiles, useCloakBrowser, useFlowImages, useEntities } from '../hooks/useProfiles';
+import { useFlowVideos } from '../hooks/useFlowVideos';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { Profile, FlowProject, GeneratedImageResult } from '../types';
 import { api } from '../services/api';
+import FlowVideosTab from './FlowVideosTab';
 import '../styles/App.css';
 
 // Helper to extract filename from path (browser-compatible)
@@ -81,6 +83,7 @@ function Sidebar({ activeTab, onTabChange, totalProfiles, activeSessions, cloakS
         { id: 'profiles', icon: '👤', label: 'Profile Manager' },
         { id: 'flow-projects', icon: '🌊', label: 'Flow Projects' },
         { id: 'flow-images', icon: '🖼️', label: 'Flow Images' },
+        { id: 'flow-videos', icon: '🎬', label: 'Flow Videos' },
         { id: 'entities', icon: '🎭', label: 'Entity Library' },
         { id: 'about', icon: '🛡️', label: 'CloakBrowser' },
     ];
@@ -657,6 +660,19 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
     const [showMaterialEditor, setShowMaterialEditor] = useState(false);
     const [editingMaterial, setEditingMaterial] = useState<MaterialStyle | null>(null);
     const [materialForm, setMaterialForm] = useState<MaterialStyle>({ id: '', label: '', color: '#4CAF50', style_instruction: '', negative_prompt: '', scene_prefix: '', lighting: '' });
+    const [entityTypePrompts, setEntityTypePrompts] = useState<Record<string, string>>({});
+    const [showEntityTypeEditor, setShowEntityTypeEditor] = useState(false);
+    const [editingEntityType, setEditingEntityType] = useState<string | null>(null);
+    const [entityTypeForm, setEntityTypeForm] = useState({ value: '', prompt: '' });
+
+    const DEFAULT_ENTITY_PROMPTS: Record<string, string> = {
+        character: 'Comprehensive character design sheet layout. Must include four distinct sections: 1. Body shots (Full body, half body, three-quarter body, and close-up). 2. Multi-angle character turnaround (A three-view: front, side, back rotation chart). 3. Expression sheet (Showing basic emotional states). 4. Pose sheet (Showing typical actions). Use a clean, neutral background.',
+        location: 'Comprehensive environment design sheet layout. Must include four distinct sections: 1. Master establishing shot (Wide angle showing the full environment). 2. Alternate angle (Reverse shot or different perspective). 3. Detail callouts (Close-up of key architectural, natural, or thematic details). 4. Lighting/Mood variation (Showing how the environment looks under different lighting or weather conditions). Maintain consistent spatial layout and atmosphere.',
+        creature: 'Comprehensive creature design sheet layout. Must include four distinct sections: 1. Body shots (Full body and close-up of face/head). 2. Multi-angle turnaround (Front, side, and back views). 3. Action/Movement poses (Showing natural stance, locomotion, or attack pose). 4. Detail callouts (Close-ups of specific anatomical features like claws, scales, or wings). Use a clean, neutral background.',
+        visual_asset: 'Comprehensive prop and asset design sheet layout. Must include four distinct sections: 1. Main beauty shot (Angled three-quarter perspective). 2. Orthographic views (Top, front, and side profiles). 3. Functional/Mechanical views (Showing how it opens, moves, or is held/used). 4. Material/Texture detail (Close-ups showcasing the surface materials and wear/tear). Use a clean, neutral background with proper scale reference.',
+        generic_troop: 'Comprehensive troop and uniform design sheet layout. Must include four distinct sections: 1. Uniform turnaround (Front, side, and back views of the standard loadout). 2. Gear breakdown (Detailed callouts of weapons, armor, and equipment). 3. Rank/Class variations (Showing slight modifications for different roles). 4. Action poses (Showing the troop in a combat or tactical stance). Use a clean, neutral background.',
+        faction: 'Comprehensive faction uniform design sheet layout. Must include four distinct sections: 1. Uniform turnaround (Front, side, and back views of the standard loadout). 2. Gear breakdown (Detailed callouts of weapons, armor, and equipment). 3. Rank/Class variations (Showing slight modifications for different roles). 4. Action poses (Showing the troop in a combat or tactical stance). Use a clean, neutral background.',
+    };
 
     const ENTITY_TYPES = [
         { value: 'character', label: 'Character', icon: '👤' },
@@ -756,6 +772,7 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                 modelKey,
                 aspectRatio,
                 upscaleResolution,
+                entityTypePrompt: entityTypePrompts[entityType],
             });
             if (result) {
                 setEntities(prev => [result, ...prev]);
@@ -830,6 +847,7 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                 modelKey: 'NANO_BANANA_PRO',
                 aspectRatio: entity.aspectRatio || 'IMAGE_ASPECT_RATIO_PORTRAIT',
                 upscaleResolution: entity.upscaleResolution || 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL',
+                entityTypePrompt: entityTypePrompts[entity.entityType],
             });
             if (result) {
                 setEntities(prev => [result, ...prev]);
@@ -899,6 +917,18 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
     const deleteMaterial = (id: string) => {
         if (!confirm('Delete material "' + materials.find(m => m.id === id)?.label + '"?')) return;
         setMaterials(prev => prev.filter(m => m.id !== id));
+    };
+
+    const openEntityTypeEditor = (typeValue: string) => {
+        setEditingEntityType(typeValue);
+        setEntityTypeForm({ value: typeValue, prompt: entityTypePrompts[typeValue] || DEFAULT_ENTITY_PROMPTS[typeValue] || '' });
+        setShowEntityTypeEditor(true);
+    };
+
+    const saveEntityTypePrompt = () => {
+        setEntityTypePrompts(prev => ({ ...prev, [entityTypeForm.value]: entityTypeForm.prompt }));
+        setShowEntityTypeEditor(false);
+        setEditingEntityType(null);
     };
 
     return (
@@ -998,20 +1028,44 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                                             {ENTITY_TYPES.map(type => (
                                                 <div
                                                     key={type.value}
-                                                    onClick={() => setEntityType(type.value)}
-                                                    style={{
-                                                        padding: '8px 6px',
-                                                        borderRadius: '8px',
-                                                        background: entityType === type.value ? 'var(--primary-color)' : 'var(--bg-secondary)',
-                                                        color: entityType === type.value ? 'white' : 'var(--text)',
-                                                        cursor: 'pointer',
-                                                        textAlign: 'center',
-                                                        transition: 'all 0.2s',
-                                                        border: entityType === type.value ? '2px solid var(--primary-color)' : '2px solid transparent',
-                                                    }}
+                                                    style={{ position: 'relative' }}
                                                 >
-                                                    <div style={{ fontSize: '1rem' }}>{type.icon}</div>
-                                                    <div style={{ fontSize: '0.7rem' }}>{type.label}</div>
+                                                    <div
+                                                        onClick={() => setEntityType(type.value)}
+                                                        style={{
+                                                            padding: '8px 6px',
+                                                            borderRadius: '8px',
+                                                            background: entityType === type.value ? 'var(--primary-color)' : 'var(--bg-secondary)',
+                                                            color: entityType === type.value ? 'white' : 'var(--text)',
+                                                            cursor: 'pointer',
+                                                            textAlign: 'center',
+                                                            transition: 'all 0.2s',
+                                                            border: entityType === type.value ? '2px solid var(--primary-color)' : '2px solid transparent',
+                                                        }}
+                                                    >
+                                                        <div style={{ fontSize: '1rem' }}>{type.icon}</div>
+                                                        <div style={{ fontSize: '0.7rem' }}>{type.label}</div>
+                                                    </div>
+                                                    <button
+                                                        onClick={(e) => { e.stopPropagation(); openEntityTypeEditor(type.value); }}
+                                                        style={{
+                                                            position: 'absolute',
+                                                            top: '-4px',
+                                                            right: '-4px',
+                                                            width: '16px',
+                                                            height: '16px',
+                                                            borderRadius: '50%',
+                                                            background: entityTypePrompts[type.value] ? 'var(--primary-color)' : 'var(--text-secondary)',
+                                                            color: 'white',
+                                                            border: 'none',
+                                                            cursor: 'pointer',
+                                                            fontSize: '9px',
+                                                            lineHeight: '16px',
+                                                            textAlign: 'center',
+                                                            padding: 0,
+                                                        }}
+                                                        title="Edit entity type prompt"
+                                                    >✎</button>
                                                 </div>
                                             ))}
                                         </div>
@@ -1563,6 +1617,51 @@ function EntitiesTab({ profiles, onOpenProfile, onWaitForProfileReady, onOpenLig
                                         Cancel
                                     </button>
                                 )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Entity Type Prompt Editor Modal */}
+            {showEntityTypeEditor && (
+                <div className="modal-overlay active" onClick={(e) => e.target === e.currentTarget && setShowEntityTypeEditor(false)}>
+                    <div className="modal" style={{ maxWidth: '700px', maxHeight: '90vh', overflowY: 'auto' }}>
+                        <div className="modal-header">
+                            <h3>✏️ Edit Entity Type Prompt</h3>
+                            <button className="modal-close" onClick={() => setShowEntityTypeEditor(false)}>×</button>
+                        </div>
+                        <div className="modal-body">
+                            <div className="form-group">
+                                <label className="form-label">Entity Type</label>
+                                <input
+                                    type="text"
+                                    className="form-input"
+                                    value={ENTITY_TYPES.find(t => t.value === entityTypeForm.value)?.label || entityTypeForm.value}
+                                    disabled
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label className="form-label">Custom Prompt</label>
+                                <textarea
+                                    className="form-input"
+                                    rows={6}
+                                    placeholder="Comprehensive character design sheet layout. Must include..."
+                                    value={entityTypeForm.prompt}
+                                    onChange={(e) => setEntityTypeForm(f => ({ ...f, prompt: e.target.value }))}
+                                    style={{ resize: 'vertical' }}
+                                />
+                                <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                                    Nếu để trống, hệ thống sẽ dùng prompt mặc định tương ứng với loại entity.
+                                </p>
+                            </div>
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+                                <button className="btn btn-primary" onClick={saveEntityTypePrompt} style={{ flex: 1 }}>
+                                    💾 Save
+                                </button>
+                                <button className="btn btn-ghost" onClick={() => setShowEntityTypeEditor(false)}>
+                                    Cancel
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -2412,6 +2511,7 @@ export default function App() {
     const { profiles, loading, creating: creatingProfile, loadProfiles, createProfile, updateProfile, deleteProfile, openProfile, closeProfile, saveSession, refreshTier, setProxy, createFlowProjectsBatch, waitForProfileReady } = useProfiles();
     const { status: cloakStatus } = useCloakBrowser();
     const { generating: generatingImage, lastResult: lastGeneratedImage, error: imageError, generateImage, reset: resetGeneratedImage } = useFlowImages();
+    const videoState = useFlowVideos();
     useWebSocket();
 
     const showNotification = useCallback((message: string, type: 'success' | 'error' | 'info') => {
@@ -2581,6 +2681,14 @@ export default function App() {
                         lastResult={lastGeneratedImage}
                         error={imageError}
                         onClearResult={resetGeneratedImage}
+                        onOpenProfile={openProfile}
+                        onWaitForProfileReady={waitForProfileReady}
+                    />
+                </div>
+
+                <div className={`tab-content ${activeTab === 'flow-videos' ? 'active' : ''}`}>
+                    <FlowVideosTab
+                        profiles={profiles}
                         onOpenProfile={openProfile}
                         onWaitForProfileReady={waitForProfileReady}
                     />
