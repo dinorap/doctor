@@ -1780,10 +1780,11 @@ function FlowProjectCard({ project, profile }: FlowProjectCardProps) {
 }
 
 // Flow Projects Tab
-function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetadata }: {
+function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetadata, onOpenProfile }: {
     profiles: Profile[];
     onCreateProjectsBatch: (data: { profileIds: string[]; name: string; description?: string; toolName?: string }) => Promise<any>;
     onUpdateProfileMetadata: (profileId: string, metadata: Record<string, any>) => Promise<any>;
+    onOpenProfile?: (profileId: string, openFlow?: boolean) => Promise<void>;
 }) {
     const [showModal, setShowModal] = useState(false);
     const [projectName, setProjectName] = useState('');
@@ -1900,6 +1901,16 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
         }
     };
 
+    // Handle open profile with Flow project URL
+    const handleOpenProject = async (profileId: string, projectId: string) => {
+        if (!projectId) return;
+        if (onOpenProfile) {
+            // Open profile with Flow and navigate to specific project URL
+            const projectUrl = `https://labs.google/fx/vi/tools/flow/project/${projectId}`;
+            await onOpenProfile(profileId, true, false, projectUrl);
+        }
+    };
+
     const resetAndClose = () => {
         setShowModal(false);
         setProjectName('');
@@ -1936,13 +1947,61 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
                         <button className="btn btn-primary" onClick={() => setShowModal(true)}>+ Tạo Project Đầu Tiên</button>
                     </div>
                 ) : (
-                    <div className="flow-projects-grouped">
+                    <div className="flow-projects-grid">
                         {groupedProjectsList.map((group) => (
-                            <div key={`${group.name}-${group.projectId}`} className="flow-project-group-card">
-                                <div className="flow-project-group-header">
-                                    <h3 className="flow-project-group-name">{group.name}</h3>
+                            <div key={`${group.name}-${group.projectId}`} className="flow-project-card">
+                                <div className="flow-project-card-header">
+                                    <div className="flow-project-icon">🌊</div>
+                                    <div className="flow-project-info">
+                                        <div className="flow-project-name">{group.name}</div>
+                                        <div className="flow-project-count">
+                                            {group.profiles.length} profile{group.profiles.length > 1 ? 's' : ''}
+                                        </div>
+                                    </div>
+                                </div>
+                                {group.description && (
+                                    <div className="flow-project-description">{group.description}</div>
+                                )}
+                                <div className="flow-project-profiles-list">
+                                    {group.profiles.map((p) => (
+                                        <div key={p.profileId} className="flow-project-profile-item">
+                                            <div className="flow-project-profile-info">
+                                                <span className="flow-project-profile-name">{p.profileName}</span>
+                                                <span
+                                                    className={`flow-project-profile-id ${p.projectId ? 'clickable' : ''}`}
+                                                    onClick={() => handleOpenProject(p.profileId, p.projectId || '')}
+                                                    title={p.projectId ? `Mở project ${group.name} trên profile ${p.profileName}` : 'Chưa có ID'}
+                                                >
+                                                    {p.projectId || 'Chưa có ID'}
+                                                </span>
+                                            </div>
+                                            <div className="flow-project-profile-actions">
+                                                {p.projectId && (
+                                                    <button
+                                                        className="btn btn-ghost btn-xs"
+                                                        onClick={() => handleOpenProject(p.profileId, p.projectId || '')}
+                                                        title={`Mở ${group.name} trên ${p.profileName}`}
+                                                    >
+                                                        🌐 Mở
+                                                    </button>
+                                                )}
+                                                <div className="flow-project-tier">
+                                                    {(() => {
+                                                        const profile = profiles.find(pr => pr.id === p.profileId);
+                                                        return profile?.tier ? (
+                                                            <span className={`profile-badge badge-tier-${profile.tier.toLowerCase().replace('_', '-')}`}>
+                                                                {profile.tier === 'PAYGATE_TIER_ONE' ? 'Pro' : profile.tier === 'PAYGATE_TIER_TWO' ? 'Ultra' : '?'}
+                                                            </span>
+                                                        ) : null;
+                                                    })()}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="flow-project-actions">
                                     <button
-                                        className="btn btn-ghost btn-sm"
+                                        className="btn btn-danger btn-sm"
                                         onClick={() => {
                                             if (confirm(`Xóa dự án "${group.name}" khỏi tất cả profiles?`)) {
                                                 group.profiles.forEach(p => {
@@ -1959,19 +2018,8 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
                                         }}
                                         title="Xóa dự án"
                                     >
-                                        🗑️
+                                        🗑️ Xóa
                                     </button>
-                                </div>
-                                {group.description && (
-                                    <p className="flow-project-group-desc">{group.description}</p>
-                                )}
-                                <div className="flow-project-group-profiles">
-                                    {group.profiles.map((p) => (
-                                        <div key={p.profileId} className="profile-project-row">
-                                            <span className="profile-name">{p.profileName}</span>
-                                            <span className="profile-project-id">{p.projectId || '—'}</span>
-                                        </div>
-                                    ))}
                                 </div>
                             </div>
                         ))}
@@ -2540,10 +2588,10 @@ export default function App() {
         }
     };
 
-    const handleOpenProfile = async (id: string, openFlow?: boolean, useStealth?: boolean) => {
+    const handleOpenProfile = async (id: string, openFlow?: boolean, useStealth?: boolean, projectUrl?: string) => {
         try {
             showNotification(`Đang mở profile...`, 'info');
-            await openProfile(id, openFlow, useStealth);
+            await openProfile(id, openFlow, useStealth, projectUrl);
             showNotification('Profile đã được mở! Tier sẽ được cập nhật tự động.', 'success');
         } catch (e) {
             showNotification(e instanceof Error ? e.message : 'Lỗi khi mở profile', 'error');
@@ -2610,6 +2658,55 @@ export default function App() {
     const handleDeleteProfile = async (id: string) => {
         if (!confirm('Bạn có chắc muốn xóa profile này?')) return;
         try {
+            const profileToDelete = profiles.find(p => p.id === id);
+            if (!profileToDelete) {
+                showNotification('Không tìm thấy profile!', 'error');
+                return;
+            }
+
+            const profileProjects = profileToDelete.metadata?.flowProjects || [];
+
+            // Group projects by name to check which ones have multiple profiles
+            const projectNameCount = new Map<string, number>();
+            profiles.forEach(p => {
+                const projects = p.metadata?.flowProjects || [];
+                projects.forEach((proj: any) => {
+                    if (proj.name) {
+                        projectNameCount.set(proj.name, (projectNameCount.get(proj.name) || 0) + 1);
+                    }
+                });
+            });
+
+            // Separate projects: shared (exists on multiple profiles) vs only-on-deleted-profile
+            const projectsShared: string[] = [];
+            const projectsOnlyOnDeleted: string[] = [];
+
+            profileProjects.forEach((proj: any) => {
+                if (proj.name) {
+                    const count = projectNameCount.get(proj.name) || 0;
+                    if (count === 1) {
+                        projectsOnlyOnDeleted.push(proj.name);
+                    } else {
+                        projectsShared.push(proj.name);
+                    }
+                }
+            });
+
+            // For shared projects: only remove this profile's entry (other profiles keep the project)
+            for (const projectName of projectsShared) {
+                const profile = profiles.find(p => p.id === id);
+                if (profile?.metadata?.flowProjects) {
+                    // Remove only this profile's entry for this project name
+                    const updatedProjects = profile.metadata.flowProjects.filter((p: any) => p.name !== projectName);
+                    await api.updateProfileMetadata(id, {
+                        ...profile.metadata,
+                        flowProjects: updatedProjects
+                    });
+                }
+            }
+            // Note: projectsOnlyOnDeleted don't need to be removed from this profile
+            // since the profile itself is being deleted anyway
+
             await deleteProfile(id);
             showNotification('Đã xóa profile!', 'success');
         } catch (e) {
@@ -2670,6 +2767,7 @@ export default function App() {
                         profiles={profiles}
                         onCreateProjectsBatch={handleCreateFlowProjectsBatch}
                         onUpdateProfileMetadata={handleUpdateProfileMetadata}
+                        onOpenProfile={handleOpenProfile}
                     />
                 </div>
 

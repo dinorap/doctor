@@ -43,8 +43,8 @@ export function useProfiles() {
         setProfiles(prev => prev.filter(p => p.id !== id));
     }, []);
 
-    const openProfile = useCallback(async (id: string, openFlow?: boolean, useStealth?: boolean) => {
-        await api.openProfile({ id, openFlow, useStealth });
+    const openProfile = useCallback(async (id: string, openFlow?: boolean, useStealth?: boolean, projectUrl?: string) => {
+        await api.openProfile({ id, openFlow, useStealth, projectUrl });
         await loadProfiles();
     }, [loadProfiles]);
 
@@ -96,30 +96,22 @@ export function useProfiles() {
             const next: any = { ...p };
             if (status) {
                 if (typeof status.connected === 'boolean') next.extensionConnected = status.connected;
-                if (status.tier) next.tier = status.tier;
-                if (typeof status.credits === 'number') next.credits = status.credits;
-                if (status.state) next.extensionState = status.state;
+                if (typeof status.tier === 'string' || status.tier === null) next.tier = status.tier || null;
+                if (typeof status.credits === 'number' || status.credits === null) next.credits = status.credits;
+                if (typeof status.state === 'string' || status.state === null) next.extensionState = status.state;
                 if (typeof status.flowKeyPresent === 'boolean') next.flowKeyPresent = status.flowKeyPresent;
                 if (typeof status.tokenAge === 'number' || status.tokenAge === null) next.tokenAge = status.tokenAge;
-                if (status.lastError !== undefined) lastErrorRef.current = status.lastError;
+                if (status.lastError !== undefined) next.lastError = status.lastError;
             }
             return next;
         }));
     }, []);
 
     const lastErrorRef = useRef<string | null>(null);
+    const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const browserClosedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // Listen for WebSocket tier-updated events.
-    //
-    // We do BOTH:
-    //   1) Patch the in-memory profile record so the badge flips
-    //      immediately (no flash of stale state).
-    //   2) Re-fetch the profile list from the server so any field we
-    //      didn't explicitly patch (proxy, lastUsedAt, …) stays in
-    //      sync. Without this, server-driven tier changes can look
-    //      stuck on the dashboard if the in-memory patch is shadowed
-    //      by a subsequent loadProfiles() call that re-reads the
-    //      pre-broadcast value.
+    // Listen for WebSocket events.
     useEffect(() => {
         const handleProfilesUpdated = () => {
             console.log('[useProfiles] profiles-updated via WebSocket, reloading...');
@@ -152,16 +144,40 @@ export function useProfiles() {
             }
         };
 
+        // Handle browser-closed event — update state without reload to avoid blinking
+        const handleBrowserClosed = (event: CustomEvent) => {
+            const { profileId } = event.detail || {};
+            console.log('[useProfiles] browser-closed via WebSocket:', profileId);
+            // Update extension status for this profile to show it's now closed
+            if (profileId) {
+                updateProfileExtensionStatus(profileId, {
+                    connected: false,
+                    flowKeyPresent: false,
+                    state: 'off',
+                    tokenAge: null,
+                    lastError: null,
+                    tier: null,
+                    credits: null,
+                });
+            }
+        };
+
         window.addEventListener('profiles-updated', handleProfilesUpdated);
         window.addEventListener('tier-updated', handleTierUpdated as EventListener);
         window.addEventListener('extension-status', handleExtensionStatus as EventListener);
+        window.addEventListener('browser-closed', handleBrowserClosed as EventListener);
         return () => {
             window.removeEventListener('profiles-updated', handleProfilesUpdated);
             window.removeEventListener('tier-updated', handleTierUpdated as EventListener);
             window.removeEventListener('extension-status', handleExtensionStatus as EventListener);
+            window.removeEventListener('browser-closed', handleBrowserClosed as EventListener);
             if (refreshTimerRef.current) {
                 clearTimeout(refreshTimerRef.current);
                 refreshTimerRef.current = null;
+            }
+            if (browserClosedTimerRef.current) {
+                clearTimeout(browserClosedTimerRef.current);
+                browserClosedTimerRef.current = null;
             }
         };
     }, [updateProfileTier, updateProfileExtensionStatus, loadProfiles]);
@@ -175,8 +191,6 @@ export function useProfiles() {
             }
         });
     }, [profiles]);
-
-    const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     useEffect(() => {
         loadProfiles();

@@ -93,7 +93,7 @@ export class ExtensionBridgeRegistry extends EventEmitter {
     public remove(profileId: string): void {
         const bridge = this.bridges.get(profileId);
         if (!bridge) return;
-        bridge.dispose();
+        bridge.close();
         this.bridges.delete(profileId);
         logger.info('[ExtensionBridgeRegistry] Removed bridge for profile %s', profileId);
         this.emit('removed', { profileId });

@@ -690,7 +690,13 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
                     userPaygateTier: resolvedTier,
                     modelKey: apiModelKey,
                 });
-                usedBridge = true;
+                const resultStr = typeof result === 'string' ? result.trim() : '';
+                if (resultStr.startsWith('<!DOCTYPE') || resultStr.startsWith('<html')) {
+                    logger.warn('Extension bridge returned HTML 404 for image generation endpoint, falling back to FlowApiClient');
+                    result = null;
+                } else {
+                    usedBridge = true;
+                }
             } catch (bridgeError: any) {
                 logger.warn('Extension bridge generateImages failed for %s, falling back: %s', profileId, bridgeError.message);
             }
@@ -915,7 +921,7 @@ router.post('/flow/projects/prepare-profile', async (req: Request, res: Response
  * (returns 400) so we never accidentally deliver an extension response
  * to the wrong profile.
  */
-router.post('/ext/callback', express.json({ type: '*/*', limit: '10mb' }), (req: Request, res: Response) => {
+router.post('/ext/callback', express.json({ type: '*/*', limit: '100mb' }), (req: Request, res: Response) => {
     try {
         const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
         const data = req.body || {};
@@ -1171,6 +1177,7 @@ router.post('/profiles/open', async (req: Request, res: Response) => {
         const profileState = await browserManager.launchProfile(profile, {
             useCloakBrowser: requestAny.useStealth,
             proxy: proxyConfig,
+            projectUrl: requestAny.projectUrl,
         });
 
         // Update last used timestamp
@@ -1550,6 +1557,10 @@ router.post('/profiles/:id/close', async (req: Request, res: Response) => {
         const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
         if (extensionRegistry) extensionRegistry.remove(id);
         if (flowRegistry) flowRegistry.remove(id);
+
+        // Broadcast so dashboard updates without reload
+        const broadcast = req.app.locals.broadcast as (event: string, data: any) => void;
+        broadcast('profiles-updated', { profileId: id });
 
         logger.info(`Closed browser for profile: ${id}`);
         res.json({
@@ -2053,7 +2064,14 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
                     userPaygateTier: tier,
                     modelKey: apiModelKey,
                 });
-                usedBridge = true;
+                // Detect HTML 404 error page returned by the bridge (endpoint deprecated/unavailable)
+                const resultStr = typeof result === 'string' ? result.trim() : '';
+                if (resultStr.startsWith('<!DOCTYPE') || resultStr.startsWith('<html')) {
+                    logger.warn('Extension bridge returned HTML 404 for image generation endpoint, falling back to FlowApiClient');
+                    result = null;
+                } else {
+                    usedBridge = true;
+                }
             } catch (bridgeError: any) {
                 logger.warn('Extension bridge generate failed for %s: %s', profileId, bridgeError.message);
             }
@@ -2138,21 +2156,25 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
                     const upscalePath = path.join(entitiesDir, `${mediaId}${upscaleSuffix}.${ext}`);
 
                     // Call upscaleImage via bridge
+                    const sessionRecord = db.getSessionByProfileId(profileId);
+                    const tier = sessionRecord?.tier || (profile.tier as PaygateTier) || 'PAYGATE_TIER_TWO';
                     const upscaleResponse = await bridge.upscaleImage({
                         mediaId,
                         targetResolution: upscaleResolution,
                         projectId: targetProjectId,
+                        userPaygateTier: tier,
                     });
 
                     logger.info(`[Image Upscale] Response: ${JSON.stringify(upscaleResponse)?.substring(0, 500)}`);
 
                     // Parse response - could be:
-                    // 1. { name: "operations/xxx", done: true, metadata: { image: { fifeUrl: "..." } } }
-                    // 2. { encodedImage: "base64..." } (direct base64 response)
-                    const encodedImage = upscaleResponse?.encodedImage;
-                    const opName = upscaleResponse?.name;
-                    const opDone = upscaleResponse?.done;
-                    const opMetadata = upscaleResponse?.metadata || {};
+                    // 1. { json: { encodedImage: "base64..." } } (direct base64 response)
+                    // 2. { json: { name: "operations/xxx", done: true, metadata: { image: { fifeUrl: "..." } } } }
+                    const bridgeResponse = upscaleResponse?.json ?? upscaleResponse;
+                    const encodedImage = bridgeResponse?.encodedImage;
+                    const opName = bridgeResponse?.name;
+                    const opDone = bridgeResponse?.done;
+                    const opMetadata = bridgeResponse?.metadata || {};
                     const imageMeta = opMetadata.image || {};
                     const fifeUrl = imageMeta.fifeUrl;
 
@@ -2330,20 +2352,26 @@ router.post('/entities/:id/upscale', async (req: Request, res: Response) => {
 
         logger.info(`[Upscale Entity] Upscaling entity ${req.params.id}: mediaId=${originalMediaId}, resolution=${upscaleResolution}`);
 
+        // Get tier from database (not hardcoded)
+        const sessionRecord = db.getSessionByProfileId(profileId);
+        const tier = (sessionRecord?.tier as PaygateTier) || (profile.tier as PaygateTier) || 'PAYGATE_TIER_TWO';
+
         // Call upscaleImage via bridge
         const upscaleResponse = await bridge.upscaleImage({
             mediaId: originalMediaId,
             targetResolution: upscaleResolution,
             projectId: entity.projectId,
+            userPaygateTier: tier,
         });
 
         logger.info(`[Upscale Entity] Response: ${JSON.stringify(upscaleResponse)?.substring(0, 500)}`);
 
-        // Parse response
-        const encodedImage = upscaleResponse?.encodedImage;
-        const opName = upscaleResponse?.name;
-        const opDone = upscaleResponse?.done;
-        const opMetadata = upscaleResponse?.metadata || {};
+        // Parse response - bridge wraps as { json: { ... } }
+        const bridgeResponse = upscaleResponse?.json ?? upscaleResponse;
+        const encodedImage = bridgeResponse?.encodedImage;
+        const opName = bridgeResponse?.name;
+        const opDone = bridgeResponse?.done;
+        const opMetadata = bridgeResponse?.metadata || {};
         const imageMeta = opMetadata.image || {};
         const fifeUrl = imageMeta.fifeUrl;
 
@@ -2887,6 +2915,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
 /**
  * POST /flow/videos/upscale - Upscale an existing generated video.
  * Body: { profileId, projectId, sceneId, mediaId, aspectRatio?, resolution? }
+ * Video upscale is ALWAYS async - returns operations for frontend polling
  */
 router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
     try {
@@ -2922,6 +2951,10 @@ router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
             return res.status(404).json({ success: false, error: 'Profile not found' });
         }
 
+        // Get tier from database (not hardcoded)
+        const sessionRecord = db.getSessionByProfileId(profileId);
+        const tier = (sessionRecord?.tier as PaygateTier) || (profile.tier as PaygateTier) || 'PAYGATE_TIER_TWO';
+
         const resolvedAspectRatio = typeof aspectRatio === 'string' && aspectRatio.trim()
             ? aspectRatio.trim()
             : 'VIDEO_ASPECT_RATIO_PORTRAIT';
@@ -2942,6 +2975,8 @@ router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
                     sceneId,
                     aspectRatio: resolvedAspectRatio,
                     resolution: resolvedResolution,
+                    projectId,
+                    userPaygateTier: tier,
                 });
                 usedBridge = true;
             } catch (bridgeError: any) {
@@ -2953,7 +2988,7 @@ router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
             if (!flowClient || !flowClient.hasFlowKey()) {
                 return res.status(503).json({
                     success: false,
-                    error: 'Flow client ch?a c? flowKey. Extension c?a profile n?y ch?a k?t n?i ho?c ch?a capture token.',
+                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
                 });
             }
             result = await flowClient.upscaleVideo({
@@ -2964,6 +2999,71 @@ router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
             });
         }
 
+        // Extract operations and media from async response for polling
+        // Bridge wraps response as { data: { json: { operations: [...] } } } or { data: { operations: [...] } }
+        const bridgeResult = result?.data ?? result;
+        const bridgeJson = bridgeResult?.json ?? bridgeResult;
+
+        // Debug: log full response structure
+        logger.info(`[Video Upscale] Raw bridge response keys: ${Object.keys(bridgeResult || {}).join(', ')}`);
+        logger.info(`[Video Upscale] Raw bridgeJson keys: ${Object.keys(bridgeJson || {}).join(', ')}`);
+        logger.info(`[Video Upscale] Raw response sample: ${JSON.stringify(bridgeJson)?.substring(0, 500)}`);
+
+        const operations: string[] = [];
+        const mediaIds: string[] = [];
+
+        // CRITICAL: Upscale creates a NEW media ID with "_upsampled" suffix
+        // We need to construct this and poll status for it
+        const upsampledMediaId = `${mediaId}_upsampled`;
+        logger.info(`[Video Upscale] Original mediaId=${mediaId} -> upsampledMediaId=${upsampledMediaId}`);
+
+        // Add the upsampled media ID to the list for polling
+        mediaIds.push(upsampledMediaId);
+
+        // Check for workflows (like Python implementation)
+        const workflows = bridgeJson?.workflows || bridgeResult?.workflows || [];
+        if (Array.isArray(workflows) && workflows.length > 0) {
+            logger.info(`[Video Upscale] Found workflows array with ${workflows.length} items`);
+            for (const wf of workflows) {
+                if (wf?.name) {
+                    mediaIds.push(wf.name);
+                }
+            }
+        }
+
+        // Also check operations format
+        if (bridgeJson?.operations && Array.isArray(bridgeJson.operations)) {
+            for (const op of bridgeJson.operations) {
+                // Old format: { operation: { name: "..." } }
+                if (op?.operation?.name) {
+                    operations.push(op.operation.name);
+                }
+                // New format: { name: "..." }
+                if (op?.name) {
+                    // Don't overwrite upsampledMediaId, but add if different
+                    if (!op.name.includes('_upsampled')) {
+                        mediaIds.push(op.name);
+                    }
+                }
+            }
+        }
+
+        if (bridgeJson?.media && Array.isArray(bridgeJson.media)) {
+            for (const item of bridgeJson.media) {
+                if (item?.name) {
+                    // Don't overwrite upsampledMediaId, but add if different
+                    if (!item.name.includes('_upsampled')) {
+                        mediaIds.push(item.name);
+                    }
+                }
+            }
+        }
+
+        // Frontend uses requestIds for polling (same as operations)
+        const requestIds = operations;
+
+        logger.info(`[Video Upscale] Final: upsampledMediaId=${upsampledMediaId}, requestIds=${requestIds.length} mediaIds=${mediaIds.length} usedBridge=${usedBridge}`);
+
         res.json({
             success: true,
             data: {
@@ -2971,14 +3071,46 @@ router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
                 projectId,
                 sceneId,
                 mediaId,
+                upsampledMediaId, // The new media ID for polling
                 aspectRatio: resolvedAspectRatio,
                 resolution: resolvedResolution,
+                operations,
+                requestIds, // For frontend polling compatibility
+                mediaIds,
                 rawResult: result,
             },
-            message: usedBridge ? 'Upscale video th?nh c?ng qua Extension' : 'Upscale video th?nh c?ng qua Flow API',
+            message: usedBridge
+                ? 'Video upscale started via Extension (polling...)'
+                : 'Video upscale started via Flow API (polling...)',
         });
     } catch (error: any) {
         logger.error('Error upscaling Flow video:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * GET /flow/videos/file - Serve a saved video file
+ * Query: ?mediaId=xxx
+ */
+router.get('/flow/videos/file', async (req: Request, res: Response) => {
+    try {
+        const { mediaId } = req.query as { mediaId?: string };
+
+        if (!mediaId) {
+            return res.status(400).json({ success: false, error: 'mediaId is required' });
+        }
+
+        const filepath = path.join(process.cwd(), 'data', 'videos', `${mediaId}.mp4`);
+
+        if (!fs.existsSync(filepath)) {
+            return res.status(404).json({ success: false, error: 'Video file not found' });
+        }
+
+        logger.info(`[Video File] Serving: ${filepath}`);
+        return res.sendFile(filepath);
+    } catch (error: any) {
+        logger.error('Error serving video file:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -3061,10 +3193,25 @@ router.get('/flow/videos/download', async (req: Request, res: Response) => {
                     videoUrl: fifeUrl,
                 },
             });
+        } else {
+            // Check if file was already saved previously
+            const videosDir = path.join(process.cwd(), 'data', 'videos');
+            const existingPath = path.join(videosDir, `${mediaId}.mp4`);
+            if (fs.existsSync(existingPath)) {
+                return res.json({
+                    success: true,
+                    data: {
+                        mediaId,
+                        format: 'saved',
+                        alreadySaved: true,
+                        savedPath: existingPath,
+                    },
+                });
+            }
         }
 
-        return res.status(404).json({ 
-            success: false, 
+        return res.status(404).json({
+            success: false,
             error: 'Video not ready or not found',
             data,
         });
@@ -3121,7 +3268,12 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
         }
         if (allMediaIds.length > 0 && cachedItems.length === allMediaIds.length) {
             logger.info(`[Video Status] All ${allMediaIds.length} mediaIds already SUCCESSFUL (cached) - skipping batchCheck`);
-            result = { media: cachedItems };
+            // Ensure the result has the correct structure for parsing
+            result = { 
+                media: cachedItems,
+                operations: [], // No operations when using cache
+                data: { media: cachedItems } // Also set data for compatibility
+            };
             usedBridge = true;
             cachedResult = true;
         }
@@ -3263,12 +3415,16 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                     const probeResp = await bridge.getMedia(probeMediaId);
                     const rawData = probeResp?.data || probeResp || {};
                     const videoObj = rawData.video || {};
+                    
+                    // NOTE: Don't include encodedVideo in autoDownloadResult to avoid PayloadTooLargeError
+                    // The frontend will download via /api/flow/videos/download endpoint
                     autoDownloadResult = {
                         mediaId: probeMediaId,
                         success: !!videoObj.encodedVideo || !!(videoObj.fifeUrl || videoObj.servingBaseUri),
                         hasEncodedVideo: !!videoObj.encodedVideo,
                         encodedVideoLength: videoObj.encodedVideo?.length || 0,
                         hasFifeUrl: !!(videoObj.fifeUrl || videoObj.servingBaseUri),
+                        message: 'Use /api/flow/videos/download to get video data',
                     };
 
                     // === AUTO-SAVE: If encodedVideo present, save to data/videos/ ===
@@ -3295,6 +3451,15 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
             }
         }
 
+        // === CRITICAL: Don't include rawMedia in response if it contains large video data ===
+        // This causes PayloadTooLargeError when batchCheckAsyncVideoGenerationStatus returns
+        // media items with encodedVideo base64 data. Only include completedVideos. ===
+        const responseMedia = (rawMedia as any[]).map((item: any) => {
+            // Clone and strip large data
+            const { encodedVideo, ...cleanItem } = item || {};
+            return cleanItem;
+        });
+
         res.json({
             success: true,
             data: {
@@ -3302,18 +3467,19 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                 projectId,
                 operations: rawOps,
                 mediaIds,
-                status: result,
-                media: rawMedia,
+                // Don't include raw response status object (may contain large data)
+                media: responseMedia,
                 completedVideos,
                 isComplete,
                 hasActiveMedia,
                 hasSuccessfulMedia,
-                autoDownloadResult, // <-- AUTO-PROBE result included
-                shouldStopPolling: isComplete, // <-- Frontend should stop polling
+                autoDownloadResult,
+                shouldStopPolling: isComplete,
                 stopReason: isComplete ? 'Video generation completed (SUCCESSFUL)' : null,
             },
             message: usedBridge ? 'Kiểm tra trạng thái qua Extension' : 'Kiểm tra trạng thái qua Flow API',
         });
+        logger.info(`[Video Status] RESPONSE: success=true, isComplete=${isComplete}, hasSuccessfulMedia=${hasSuccessfulMedia}, completedVideos=${completedVideos.length}, shouldStopPolling=${isComplete}`);
     } catch (error: any) {
         logger.error('Error checking Flow video status:', error);
         res.status(500).json({ success: false, error: error.message });

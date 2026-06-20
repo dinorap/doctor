@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import type { Profile, FlowProject, GeneratedVideoResult, LibraryEntity } from '../types';
-import type { VideoAspectRatio, VideoDuration, VideoUpscaleResolution } from '../types';
+import type { Profile, FlowProject, GeneratedVideoResult, LibraryEntity, CompletedVideo } from '../types';
+import type { VideoAspectRatio, VideoDuration, VideoUpscaleResolution, SelectedVideoResolution } from '../types';
 import { api } from '../services/api';
 import LibraryModal from './LibraryModal';
 
@@ -135,10 +135,27 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
   const [lastResult, setLastResult] = useState<GeneratedVideoResult | null>(null);
   const lastResultRef = useRef<GeneratedVideoResult | null>(null);
   useEffect(() => { lastResultRef.current = lastResult; }, [lastResult]);
+  
+  // Track download completion to stop polling
+  const downloadCompleteRef = useRef(false);
+  
   const [error, setError] = useState<string | null>(null);
   const [showLibrary, setShowLibrary] = useState(false);
   const [libraryTarget, setLibraryTarget] = useState<'start' | 'end' | 'reference'>('start');
   const pollTimerRef = useRef<number | null>(null);
+
+  // Upscale state - reused for both manual upscale and auto-upscale flow
+  const [upscaleState, setUpscaleState] = useState<{
+    active: boolean;
+    resolution: SelectedVideoResolution;
+    sourceMediaId: string | null;
+    requestIds: string[];
+    mediaIds: string[];
+    status: 'idle' | 'generating' | 'polling' | 'downloading' | 'done' | 'error';
+    finalVideoUrl: string | null;
+    error: string | null;
+  }>({ active: false, resolution: 'original', sourceMediaId: null, requestIds: [], mediaIds: [], status: 'idle', finalVideoUrl: null, error: null });
+  const upscalePollTimerRef = useRef<number | null>(null);
 
   // MARKER: identifies this build as the "stop-on-complete" version
   console.info('[FlowVideosTab] v2.0 mounted - stop-on-complete build (2026-06-19)');
@@ -415,6 +432,20 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
     setGenerating(true);
     setError(null);
     setLastResult(null);
+    // Reset upscale state (keep resolution selection for auto-upscale after download)
+    if (upscalePollTimerRef.current) {
+      window.clearInterval(upscalePollTimerRef.current);
+    }
+    setUpscaleState(prev => ({ 
+      ...prev,
+      active: false, 
+      sourceMediaId: null, 
+      requestIds: [], 
+      mediaIds: [], 
+      status: 'idle', 
+      finalVideoUrl: null, 
+      error: null 
+    }));
 
     try {
       await ensureProfileReady();
@@ -535,34 +566,67 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
     }
   };
 
-  const handleUpscale = async (resolution: VideoUpscaleResolution) => {
-    if (!lastResult?.mediaId) {
+  const handleUpscale = async (resolution: SelectedVideoResolution, sourceMediaId?: string) => {
+    const sourceId = sourceMediaId || lastResult?.mediaId;
+    if (!sourceId) {
       setError('Generate a video first before upscaling');
       return;
     }
+    if (resolution === 'original') {
+      // Just show the original video
+      return;
+    }
+
+    // Clear any existing upscale poll
+    if (upscalePollTimerRef.current) {
+      window.clearInterval(upscalePollTimerRef.current);
+    }
+
     setGenerating(true);
     setError(null);
+    setUpscaleState({
+      active: true,
+      resolution,
+      sourceMediaId: sourceId,
+      requestIds: [],
+      mediaIds: [],
+      status: 'polling',
+      finalVideoUrl: null,
+      error: null,
+    });
+
     try {
       await ensureProfileReady();
       const result = await api.upscaleFlowVideo({
-        profileId: lastResult.profileId,
-        projectId: lastResult.projectId,
-        sceneId: lastResult.sceneId,
-        mediaId: lastResult.mediaId,
+        profileId: lastResult!.profileId,
+        projectId: lastResult!.projectId,
+        sceneId: lastResult!.sceneId,
+        mediaId: sourceId,
         aspectRatio,
-        resolution,
+        resolution: resolution as VideoUpscaleResolution,
       });
-      setLastResult((prev) =>
-        prev
-          ? {
-            ...prev,
-            operations: result.operations || prev.operations,
-            requestIds: result.requestIds || prev.requestIds,
-          }
-          : prev,
-      );
+
+      const newRequestIds = result.requestIds || [];
+      const newMediaIds = result.mediaIds || [];
+
+      console.info('[Upscale] Started - resolution:', resolution, 'requestIds:', newRequestIds, 'mediaIds:', newMediaIds);
+
+      setUpscaleState(prev => ({
+        ...prev,
+        requestIds: newRequestIds,
+        mediaIds: newMediaIds,
+        status: newRequestIds.length > 0 || newMediaIds.length > 0 ? 'polling' : 'error',
+      }));
+
+      // Start polling for upscale completion
+      if (newRequestIds.length > 0 || newMediaIds.length > 0) {
+        startUpscalePolling(resolution, newRequestIds, newMediaIds);
+      } else {
+        setUpscaleState(prev => ({ ...prev, status: 'error', error: 'No operations returned from upscale API' }));
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Upscale failed');
+      console.error('[Upscale] Error:', err);
+      setUpscaleState(prev => ({ ...prev, status: 'error', error: err instanceof Error ? err.message : 'Upscale failed' }));
     } finally {
       setGenerating(false);
     }
@@ -600,12 +664,28 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
 
     const timer = window.setInterval(async () => {
       try {
-        // === STOP POLLING if we already have a videoUrl for the current mediaId ===
-        if (lastResultRef.current?.completedVideos?.length && lastResultRef.current.completedVideos[0].videoUrl) {
-          console.info('[Video Poll] Already have videoUrl, stopping poll');
+        // === STOP POLLING if download is complete ===
+        if (downloadCompleteRef.current) {
+          console.info('[Video Poll] Download complete ref set, stopping poll');
           window.clearInterval(timer);
           return;
         }
+        
+        // === STOP POLLING if we already have a videoUrl for the current mediaId ===
+        const currentRef = lastResultRef.current;
+        if (currentRef?.completedVideos?.length && currentRef.completedVideos[0].videoUrl) {
+          console.info('[Video Poll] Already have videoUrl in ref, stopping poll');
+          window.clearInterval(timer);
+          return;
+        }
+
+        // === STOP POLLING if we just set videoUrl (download complete) ===
+        if (currentRef?.videoUrl) {
+          console.info('[Video Poll] videoUrl set in ref, stopping poll');
+          window.clearInterval(timer);
+          return;
+        }
+
         const status = await api.checkVideoStatus({
           profileId: lastResult!.profileId,
           projectId: lastResult!.projectId,
@@ -613,11 +693,33 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           mediaIds: mediaIds,
         });
         
-        if (!status || !status.success) return;
+        if (!status || !status.isComplete) {
+          console.warn('[Video Poll] API call failed or returned incomplete status:', status);
+          window.clearInterval(timer);
+          return;
+        }
 
-        console.info('[Video Poll] Raw API response:', JSON.stringify(status).substring(0, 500));
+        console.info('[Video Poll] Raw API response:', JSON.stringify(status).substring(0, 1000));
 
-        const { completedVideos, isComplete, media, hasActiveMedia, hasSuccessfulMedia } = status.data || {};
+        // Destructure from status directly (api.request already unwraps {success, data} → returns data)
+        const statusData = (status || {}) as {
+          completedVideos?: CompletedVideo[];
+          isComplete?: boolean;
+          media?: any[];
+          hasActiveMedia?: boolean;
+          hasSuccessfulMedia?: boolean;
+          shouldStopPolling?: boolean;
+          autoDownloadResult?: any;
+        };
+        const { 
+          completedVideos = [], 
+          isComplete = false, 
+          media = [], 
+          hasActiveMedia = false, 
+          hasSuccessfulMedia = false,
+          shouldStopPolling = false,
+          autoDownloadResult,
+        } = statusData;
         console.info('[Video Poll] Status response:', {
           isComplete,
           hasSuccessfulMedia,
@@ -626,6 +728,8 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           completedVideosFirst: completedVideos?.[0],
           mediaIdsCount: mediaIds?.length,
           mediaIdsFirst: mediaIds?.[0],
+          shouldStopPolling,
+          statusDataKeys: Object.keys(statusData),
         });
         
         // Update queue progress
@@ -672,6 +776,8 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
               if (downloadData.success && downloadData.data) {
                 const encodedVideo = downloadData.data.encodedVideo;
                 const directUrl = downloadData.data.videoUrl;
+                const alreadySaved = downloadData.data.alreadySaved;
+                const savedPath = downloadData.data.savedPath;
 
                 if (encodedVideo) {
                   console.info('[Video Poll] Got encodedVideo (attempt', attempt, '), converting to blob URL...');
@@ -682,6 +788,16 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                 } else if (directUrl) {
                   videoUrl = directUrl;
                   break;
+                } else if (alreadySaved && savedPath) {
+                  // Backend already saved the file - fetch it directly
+                  console.info('[Video Poll] Video already saved by backend, fetching from:', savedPath);
+                  const fileResponse = await fetch(`/api/flow/videos/file?mediaId=${mediaIdFromStatus}`);
+                  if (fileResponse.ok) {
+                    const blob = await fileResponse.blob();
+                    videoUrl = URL.createObjectURL(blob);
+                    console.info('[Video Poll] Loaded saved video from backend, size:', blob.size);
+                    break;
+                  }
                 }
               }
 
@@ -693,6 +809,11 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
 
             if (videoUrl) {
               console.info('[Video Poll] Video ready! URL length:', videoUrl.length);
+              
+              // Set ref FIRST to stop polling on next tick
+              downloadCompleteRef.current = true;
+              
+              // Update state
               setLastResult((prev) => (prev ? {
                 ...prev,
                 completedVideos: [{ mediaId: mediaIdFromStatus, videoUrl, status: 'SUCCESSFUL' }],
@@ -709,9 +830,28 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                 ),
               );
 
-              // === Stop polling immediately on success ===
+              console.info('[Video Poll] Done! Download complete, stopping polling.');
+
+              // === AUTO-UPSCALE: Trigger immediately after download ===
+              const currentResolution = upscaleState.resolution;
+              // Use mediaIdFromStatus (which is the actual mediaId from the status response)
+              const upscaleMediaId = mediaIdFromStatus;
+              console.info('[Video Poll] Auto-upscale check:', {
+                resolution: currentResolution,
+                upscaleMediaId,
+                upscaleActive: upscaleState.active,
+                lastResultProfileId: lastResult?.profileId,
+                lastResultProjectId: lastResult?.projectId,
+              });
+              if (currentResolution !== 'original' && upscaleMediaId && !upscaleState.active) {
+                console.info('[Video Poll] Triggering auto-upscale to', currentResolution, 'for mediaId:', upscaleMediaId);
+                // Call handleUpscale directly (it's async but we don't need to await)
+                handleUpscale(currentResolution, upscaleMediaId);
+              }
+              
+              // Stop polling
               window.clearInterval(timer);
-              console.info('[Video Poll] Done! Stopped polling (timer cleared).');
+              return;
             } else {
               console.warn('[Video Poll] Download failed after 3 attempts. Will retry on next poll.');
               // Don't stop polling - will retry on next interval
@@ -730,7 +870,107 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
     }, 5000);
     
     return () => window.clearInterval(timer);
-  }, [lastResult?.videoUrl, lastResult?.requestIds?.length, lastResult?.mediaIds?.length, lastResult?.profileId, lastResult?.sceneId, onOpenProfile]);
+  }, [lastResult?.videoUrl, lastResult?.requestIds?.length, lastResult?.mediaIds?.length, lastResult?.profileId, lastResult?.sceneId, onOpenProfile, upscaleState.resolution]);
+
+  // Upscale polling - separate from main video polling
+  const startUpscalePolling = (resolution: VideoUpscaleResolution, requestIds: string[], mediaIds: string[]) => {
+    if (upscalePollTimerRef.current) {
+      window.clearInterval(upscalePollTimerRef.current);
+    }
+
+    console.info('[Upscale Poll] Starting - resolution:', resolution, 'requestIds:', requestIds, 'mediaIds:', mediaIds);
+
+    upscalePollTimerRef.current = window.setInterval(async () => {
+      try {
+        // Check if we already have the upscaled video URL
+        if (upscaleState.finalVideoUrl) {
+          console.info('[Upscale Poll] Already have upscaled video URL, stopping');
+          window.clearInterval(upscalePollTimerRef.current!);
+          return;
+        }
+
+        const status = await api.checkVideoStatus({
+          profileId: lastResult!.profileId,
+          projectId: lastResult!.projectId,
+          operations: requestIds,
+          mediaIds: mediaIds,
+        });
+
+        if (!status || !status.isComplete) {
+          console.warn('[Upscale Poll] Status check failed:', status);
+          window.clearInterval(upscalePollTimerRef.current!);
+          return;
+        }
+
+        console.info('[Upscale Poll] Status response:', {
+          isComplete: status.isComplete,
+          completedVideos: status.completedVideos?.length,
+        });
+
+        const { isComplete, completedVideos } = status;
+
+        if (isComplete && completedVideos?.length) {
+          window.clearInterval(upscalePollTimerRef.current!);
+          console.info('[Upscale Poll] COMPLETE! Downloading upscaled video...');
+
+          setUpscaleState(prev => ({ ...prev, status: 'downloading' }));
+
+          // Download the upscaled video
+          const upscaledMediaId = completedVideos[0].mediaId || mediaIds[0];
+          let upscaledVideoUrl: string | null = null;
+
+          // Try up to 3 times
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            console.info('[Upscale Poll] Download attempt', attempt, '/ 3 for mediaId:', upscaledMediaId);
+
+            const downloadResult = await fetch(`/api/flow/videos/download?profileId=${lastResult?.profileId}&mediaId=${upscaledMediaId}`);
+            const downloadData = await downloadResult.json();
+
+            if (downloadData.success && downloadData.data) {
+              const encodedVideo = downloadData.data.encodedVideo;
+              const directUrl = downloadData.data.videoUrl;
+
+              if (encodedVideo) {
+                const blob = await fetch(`data:video/mp4;base64,${encodedVideo}`).then(r => r.blob());
+                upscaledVideoUrl = URL.createObjectURL(blob);
+                console.info('[Upscale Poll] Downloaded upscaled video, size:', blob.size);
+                break;
+              } else if (directUrl) {
+                upscaledVideoUrl = directUrl;
+                break;
+              }
+            }
+
+            if (attempt < 3) {
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          }
+
+          if (upscaledVideoUrl) {
+            console.info('[Upscale Poll] Done! Setting as main video result');
+            // Set as main video result
+            setLastResult(prev => prev ? {
+              ...prev,
+              videoUrl: upscaledVideoUrl,
+              completedVideos: [{ mediaId: upscaledMediaId, videoUrl: upscaledVideoUrl, status: 'SUCCESSFUL' }],
+            } : prev);
+            setUpscaleState(prev => ({
+              ...prev,
+              status: 'done',
+              finalVideoUrl: upscaledVideoUrl,
+            }));
+          } else {
+            setUpscaleState(prev => ({ ...prev, status: 'error', error: 'Failed to download upscaled video after 3 attempts' }));
+          }
+          return;
+        }
+
+        console.info('[Upscale Poll] Still processing... isComplete:', isComplete);
+      } catch (err) {
+        console.warn('[Upscale Poll] Error:', err);
+      }
+    }, 5000);
+  };
 
   // Determine current mode for display
   const getCurrentModeLabel = () => {
@@ -899,6 +1139,36 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                   </select>
                 </div>
               )}
+
+              {/* Output Resolution */}
+              <div className="form-group">
+                <label className="form-label">Output Resolution</label>
+                <div className="resolution-btns">
+                  <button
+                    className={`resolution-btn ${upscaleState.resolution === 'original' ? 'active' : ''}`}
+                    onClick={() => setUpscaleState(prev => ({ ...prev, resolution: 'original' }))}
+                  >
+                    📹 Original
+                  </button>
+                  <button
+                    className={`resolution-btn ${upscaleState.resolution === 'VIDEO_RESOLUTION_1080P' ? 'active' : ''}`}
+                    onClick={() => setUpscaleState(prev => ({ ...prev, resolution: 'VIDEO_RESOLUTION_1080P' }))}
+                  >
+                    📺 1080p
+                  </button>
+                  <button
+                    className={`resolution-btn ${upscaleState.resolution === 'VIDEO_RESOLUTION_4K' ? 'active' : ''}`}
+                    onClick={() => setUpscaleState(prev => ({ ...prev, resolution: 'VIDEO_RESOLUTION_4K' }))}
+                  >
+                    🖥️ 4K
+                  </button>
+                </div>
+                {upscaleState.resolution !== 'original' && (
+                  <div className="resolution-hint">
+                    Will auto-generate + upscale to {upscaleState.resolution === 'VIDEO_RESOLUTION_1080P' ? '1080p' : '4K'}
+                  </div>
+                )}
+              </div>
 
               {/* START END MODE: Two images */}
               {feature === 'start_end' && (
@@ -1148,25 +1418,72 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                   </div>
                 )}
                 
-                {/* Download Button - When no videoUrl but has successful status */}
-                {!lastResult.videoUrl && lastResult.completedVideos?.[0]?.status === 'SUCCESSFUL' && (
-                  <div className="video-loading-info">
-                    <p>Video generation successful! Click download to get the video.</p>
+                {/* Upscaled Video Player - Show when upscale is complete */}
+                {upscaleState.finalVideoUrl && upscaleState.resolution !== 'original' && (
+                  <div className="upscale-result-container">
+                    <div className="upscale-result-header">
+                      <span className="upscale-badge">✨ {upscaleState.resolution === 'VIDEO_RESOLUTION_1080P' ? '1080p' : '4K'} Upscale</span>
+                    </div>
+                    <video
+                      key={upscaleState.finalVideoUrl}
+                      controls
+                      autoPlay
+                      src={upscaleState.finalVideoUrl}
+                      style={{
+                        width: '100%',
+                        maxHeight: '400px',
+                        borderRadius: '8px',
+                        backgroundColor: '#000'
+                      }}
+                    />
+                    <div className="video-url-info">
+                      <small>Upscaled video ready!</small>
+                    </div>
                   </div>
                 )}
-                
-                <div className="upscale-btns">
-                  {UPSCALE_RESOLUTIONS.map((res) => (
-                    <button
-                      key={res.value}
-                      className="btn btn-secondary"
-                      onClick={() => handleUpscale(res.value)}
-                      disabled={generating}
-                    >
-                      Upscale {res.label}
-                    </button>
-                  ))}
-                </div>
+
+                {/* Upscale Progress */}
+                {upscaleState.active && upscaleState.status === 'polling' && (
+                  <div className="upscale-progress">
+                    <div className="loading-spinner" />
+                    <span>✨ Upscaling to {upscaleState.resolution === 'VIDEO_RESOLUTION_1080P' ? '1080p' : '4K'}...</span>
+                    <span className="upscale-hint">This may take a few minutes</span>
+                  </div>
+                )}
+
+                {/* Upscale Downloading */}
+                {upscaleState.active && upscaleState.status === 'downloading' && (
+                  <div className="upscale-progress">
+                    <div className="loading-spinner" />
+                    <span>✨ Downloading upscaled video...</span>
+                  </div>
+                )}
+
+                {/* Upscale Done - Show confirmation */}
+                {upscaleState.status === 'done' && upscaleState.finalVideoUrl && (
+                  <div className="upscale-done">
+                    <span>✨ Upscale complete!</span>
+                    <span className="upscale-hint">Video ready at {upscaleState.resolution === 'VIDEO_RESOLUTION_1080P' ? '1080p' : '4K'}</span>
+                  </div>
+                )}
+
+                {/* Upscale Error */}
+                {upscaleState.error && (
+                  <div className="error-message">
+                    {upscaleState.error}
+                  </div>
+                )}
+
+                {/* Reset button after upscale done */}
+                {upscaleState.status === 'done' && (
+                  <button
+                    className="btn btn-secondary"
+                    onClick={() => setUpscaleState({ active: false, resolution: 'original', sourceMediaId: null, requestIds: [], mediaIds: [], status: 'idle', finalVideoUrl: null, error: null })}
+                    style={{ marginTop: '8px' }}
+                  >
+                    🔄 New Video
+                  </button>
+                )}
               </div>
             </div>
           )}
@@ -1490,6 +1807,44 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           background: linear-gradient(135deg, rgba(102, 126, 234, 0.3), rgba(118, 75, 162, 0.3));
           color: #ffffff;
           box-shadow: 0 0 10px rgba(102, 126, 234, 0.3);
+        }
+
+        /* Resolution Buttons */
+        .resolution-btns {
+          display: flex;
+          gap: 6px;
+        }
+
+        .resolution-btn {
+          flex: 1;
+          padding: 8px 6px;
+          border: 2px solid #333355;
+          background: #1e1e3f;
+          border-radius: 8px;
+          cursor: pointer;
+          font-weight: 500;
+          font-size: 0.85rem;
+          transition: all 0.2s;
+          color: #a0a0c0;
+        }
+
+        .resolution-btn:hover {
+          background: #2a2a4a;
+          border-color: #667eea;
+          color: #ffffff;
+        }
+
+        .resolution-btn.active {
+          border-color: #22c55e;
+          background: linear-gradient(135deg, rgba(34, 197, 94, 0.3), rgba(34, 197, 94, 0.1));
+          color: #ffffff;
+          box-shadow: 0 0 10px rgba(34, 197, 94, 0.3);
+        }
+
+        .resolution-hint {
+          font-size: 0.75rem;
+          color: #22c55e;
+          margin-top: 4px;
         }
 
         /* Images Section */
@@ -1821,6 +2176,72 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           gap: 8px;
           margin-top: 12px;
           flex-wrap: wrap;
+        }
+
+        .upscale-progress {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 8px;
+          padding: 16px;
+          background: rgba(255, 255, 255, 0.1);
+          border-radius: 8px;
+          margin: 12px 0;
+          color: #ffffff;
+        }
+
+        .upscale-hint {
+          font-size: 0.8rem;
+          color: #a0a0c0;
+        }
+
+        .upscale-badge {
+          display: inline-block;
+          padding: 4px 12px;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          border-radius: 20px;
+          font-size: 0.85rem;
+          font-weight: 600;
+          color: #ffffff;
+        }
+
+        .upscale-done {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 4px;
+          padding: 12px;
+          background: rgba(34, 197, 94, 0.2);
+          border: 1px solid rgba(34, 197, 94, 0.4);
+          border-radius: 8px;
+          margin: 12px 0;
+          color: #22c55e;
+          font-weight: 600;
+        }
+
+        .upscale-result-container {
+          margin: 12px 0;
+          padding: 12px;
+          background: rgba(102, 126, 234, 0.2);
+          border-radius: 12px;
+          border: 1px solid rgba(102, 126, 234, 0.4);
+        }
+
+        .upscale-result-header {
+          margin-bottom: 8px;
+        }
+
+        .loading-spinner {
+          width: 24px;
+          height: 24px;
+          border: 3px solid rgba(255, 255, 255, 0.3);
+          border-top-color: #667eea;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+          to { transform: rotate(360deg); }
         }
 
         /* Queue */

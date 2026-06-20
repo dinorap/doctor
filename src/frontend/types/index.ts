@@ -34,6 +34,7 @@ export interface OpenProfileRequest {
     id: string;
     openFlow?: boolean;
     useStealth?: boolean;
+    projectUrl?: string;
 }
 
 export interface ApiResponse<T = any> {
@@ -133,6 +134,8 @@ export type VideoDuration = '4s' | '6s' | '8s' | '10s';
 
 export type VideoUpscaleResolution = 'VIDEO_RESOLUTION_1080P' | 'VIDEO_RESOLUTION_4K' | 'VIDEO_RESOLUTION_8K';
 
+export type SelectedVideoResolution = 'original' | VideoUpscaleResolution;
+
 export type VideoGenerationMode = 'start_image' | 'references' | 'start_end';
 
 export interface FlowVideoModel {
@@ -197,6 +200,9 @@ export interface VideoStatusResponse {
         isComplete: boolean;
         hasActiveMedia?: boolean;
         hasSuccessfulMedia?: boolean;
+        shouldStopPolling?: boolean;
+        stopReason?: string;
+        autoDownloadResult?: any;
     };
     error?: string;
 }

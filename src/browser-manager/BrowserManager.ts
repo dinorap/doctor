@@ -111,6 +111,7 @@ export class BrowserManager {
             proxy?: string;
             geoip?: boolean;
             humanize?: boolean;
+            projectUrl?: string;
         }
     ): Promise<ProfileState> {
         const useCloak = options?.useCloakBrowser || options?.stealth || true; // Default to CloakBrowser
@@ -228,8 +229,20 @@ export class BrowserManager {
             try {
                 const pages = browserContext.pages();
                 const targetPage = pages.length > 0 ? pages[0] : await browserContext.newPage();
-                const launchUrl = `https://labs.google/fx/tools/flow?profileId=${encodeURIComponent(profile.id)}`;
-                logger.info(`Navigating to Google Flow (profileId=${profile.id})...`);
+
+                // Use projectUrl if provided, otherwise use default Flow URL
+                let launchUrl: string;
+                if (options?.projectUrl) {
+                    // Add profileId to project URL for extension binding
+                    const urlObj = new URL(options.projectUrl);
+                    urlObj.searchParams.set('profileId', profile.id);
+                    launchUrl = urlObj.toString();
+                    logger.info(`Navigating to project URL: ${launchUrl}`);
+                } else {
+                    launchUrl = `https://labs.google/fx/tools/flow?profileId=${encodeURIComponent(profile.id)}`;
+                    logger.info(`Navigating to Google Flow (profileId=${profile.id})...`);
+                }
+
                 await targetPage.goto(launchUrl, {
                     waitUntil: 'networkidle',
                     timeout: 30000

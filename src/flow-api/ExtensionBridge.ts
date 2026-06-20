@@ -447,39 +447,39 @@ export class ExtensionBridge extends EventEmitter {
         const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
         const numberOfImages = params.numberOfImages || 4;
 
-        const request: any = {
-            aspectRatio,
-            seed: Math.floor(Date.now() / 1000) % 10000,
-            textInput: {
-                structuredPrompt: {
-                    parts: [{ text: params.prompt }],
-                },
+        const baseClientContext = {
+            recaptchaContext: {
+                applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                token: '',
             },
-            sampleCount: numberOfImages,
+            projectId: params.projectId,
+            tool: 'PINHOLE',
+            userPaygateTier,
+            sessionId: `;${Date.now()}`,
         };
 
-        const body: any = {
-            mediaGenerationContext: { batchId: crypto.randomUUID() },
-            clientContext: {
-                recaptchaContext: {
-                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
-                    token: '',
-                },
-                projectId: params.projectId,
-                tool: 'PINHOLE',
-                userPaygateTier,
-                sessionId: `;${Date.now()}`,
-            },
-            requests: [request],
-            useV2ModelConfig: true,
-        };
-
-        if (params.modelKey) {
-            body.modelKey = params.modelKey;
+        // Build each request item (one per output image, varying seed)
+        const requests: any[] = [];
+        for (let i = 0; i < numberOfImages; i++) {
+            requests.push({
+                clientContext: { ...baseClientContext, sessionId: `;${Date.now() + i}` },
+                imageAspectRatio: aspectRatio,
+                seed: (Math.floor(Date.now() / 1000) + i) % 1000000,
+                prompt: params.prompt,
+                imageInputs: [],
+                ...(params.modelKey ? { imageModelName: params.modelKey } : {}),
+            });
         }
 
+        const body: any = {
+            clientContext: baseClientContext,
+            mediaGenerationContext: { batchId: crypto.randomUUID() },
+            useNewMedia: true,
+            requests,
+        };
+
         const response: any = await this.sendRequest('api_request', {
-            url: 'https://aisandbox-pa.googleapis.com/v1/image:batchAsyncGenerateImages',
+            url: `https://aisandbox-pa.googleapis.com/v1/projects/${params.projectId}/flowMedia:batchGenerateImages`,
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -649,40 +649,115 @@ export class ExtensionBridge extends EventEmitter {
         return response?.data ?? response;
     }
 
-    public async upscaleVideo(params: {
+    /**
+     * Upscale an image to higher resolution (2K or 4K)
+     * Endpoint: POST https://aisandbox-pa.googleapis.com/v1/flow/upsampleImage
+     */
+    public async upscaleImage(params: {
         mediaId: string;
-        sceneId: string;
-        aspectRatio?: string;
-        resolution?: string;
+        targetResolution: string;
+        projectId?: string;
+        userPaygateTier?: string;
     }): Promise<any> {
-        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
-        const resolution = params.resolution || 'VIDEO_RESOLUTION_4K';
+        const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
 
         const body: any = {
-            mediaGenerationContext: { batchId: crypto.randomUUID() },
+            mediaId: params.mediaId,
+            targetResolution: params.targetResolution,
             clientContext: {
                 recaptchaContext: {
                     applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
                     token: '',
                 },
+                projectId: params.projectId || '',
                 tool: 'PINHOLE',
-                userPaygateTier: 'PAYGATE_TIER_TWO',
+                userPaygateTier,
                 sessionId: `;${Date.now()}`,
             },
-            mediaId: params.mediaId,
-            sceneId: params.sceneId,
-            aspectRatio,
-            resolution,
         };
 
         const response: any = await this.sendRequest('api_request', {
-            url: 'https://aisandbox-pa.googleapis.com/v1/video:upscale',
+            url: 'https://aisandbox-pa.googleapis.com/v1/flow/upsampleImage',
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
             body,
-            captchaAction: 'VIDEO_UPSCALE',
+            captchaAction: 'IMAGE_GENERATION', // Same action as image gen (not IMAGE_UPSCALE)
+        });
+
+        if (response?.error) {
+            throw new Error(response.error);
+        }
+
+        return response?.data ?? response;
+    }
+
+    /**
+     * Upscale a video to higher resolution (1080P, 4K)
+     * Endpoint: POST https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoUpsampleVideo
+     * Video upscale is ALWAYS async - requires polling via checkVideoStatus
+     */
+    public async upscaleVideo(params: {
+        mediaId: string;
+        sceneId?: string;
+        aspectRatio?: string;
+        resolution?: string;
+        projectId?: string;
+        userPaygateTier?: string;
+        recaptchaToken?: string;
+        workflowId?: string;
+    }): Promise<any> {
+        const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
+        const resolution = params.resolution || 'VIDEO_RESOLUTION_4K';
+        const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
+
+        // Map resolution to model key
+        const UPSCALE_MODELS: Record<string, string> = {
+            'VIDEO_RESOLUTION_1080P': 'veo_3_1_upsampler_1080p',
+            'VIDEO_RESOLUTION_4K': 'veo_3_1_upsampler_4k',
+        };
+        const videoModelKey = UPSCALE_MODELS[resolution] || 'veo_3_1_upsampler_4k';
+
+        const body: any = {
+            // Exact payload from browser network capture
+            mediaGenerationContext: {
+                batchId: `;${Date.now()}`, // Same format as sessionId
+                audioFailurePreference: 'BLOCK_SILENCED_VIDEOS', // Important!
+            },
+            clientContext: {
+                projectId: params.projectId,
+                tool: 'PINHOLE',
+                userPaygateTier: userPaygateTier,
+                sessionId: `;${Date.now()}`,
+                recaptchaContext: {
+                    token: params.recaptchaToken || '', // Real token required!
+                    applicationType: 'RECAPTCHA_APPLICATION_TYPE_WEB',
+                },
+            },
+            requests: [{
+                resolution,
+                aspectRatio,
+                videoModelKey,
+                seed: Math.floor(Math.random() * 100000),
+                metadata: params.workflowId ? { workflowId: params.workflowId } : undefined,
+                videoInput: {
+                    mediaId: params.mediaId,
+                },
+            }],
+            useV2ModelConfig: true, // Important! Enables v2 model config
+        };
+
+        logger.info(`[ExtensionBridge] upscaleVideo: mediaId=${params.mediaId}, resolution=${resolution}, projectId=${params.projectId}, userPaygateTier=${userPaygateTier}`);
+
+        const response: any = await this.sendRequest('api_request', {
+            url: 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoUpsampleVideo',
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body,
+            captchaAction: 'VIDEO_GENERATION', // Same action as video gen
         });
 
         if (response?.error) {
