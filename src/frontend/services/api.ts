@@ -14,7 +14,7 @@ import type {
   GeneratedVideoResult,
   UploadImageRequest,
   UploadImageResult,
-  VideoStatusResponse,
+  VideoStatusData,
   UpscaleVideoRequest,
 } from '../types';
 
@@ -192,8 +192,8 @@ class ApiService {
     projectId?: string;
     operations?: string[]; 
     mediaIds?: string[]; 
-  }): Promise<VideoStatusResponse> {
-    return this.request<VideoStatusResponse>('/api/flow/videos/status', {
+  }): Promise<VideoStatusData> {
+    return this.request<VideoStatusData>('/api/flow/videos/status', {
       method: 'POST',
       body: JSON.stringify(data),
     });

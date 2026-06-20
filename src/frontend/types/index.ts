@@ -188,22 +188,26 @@ export interface UploadImageResult {
     rawResult: any;
 }
 
+export interface VideoStatusData {
+    profileId: string;
+    projectId?: string;
+    operations: any[];
+    mediaIds: string[];
+    status: any;
+    media: any[];
+    completedVideos: CompletedVideo[];
+    isComplete: boolean;
+    hasActiveMedia?: boolean;
+    hasSuccessfulMedia?: boolean;
+    shouldStopPolling?: boolean;
+    stopReason?: string;
+    autoDownloadResult?: any;
+    message?: string;
+}
+
 export interface VideoStatusResponse {
     success: boolean;
-    data?: {
-        profileId: string;
-        operations: any[];
-        mediaIds: string[];
-        status: any;
-        media: any[];
-        completedVideos: CompletedVideo[];
-        isComplete: boolean;
-        hasActiveMedia?: boolean;
-        hasSuccessfulMedia?: boolean;
-        shouldStopPolling?: boolean;
-        stopReason?: string;
-        autoDownloadResult?: any;
-    };
+    data?: VideoStatusData;
     error?: string;
 }
 

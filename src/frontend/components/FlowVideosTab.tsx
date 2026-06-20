@@ -819,7 +819,7 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                 completedVideos: [{ mediaId: mediaIdFromStatus, videoUrl, status: 'SUCCESSFUL' }],
                 videoUrl,
                 media: media || [],
-                operations: status.data?.operations || [],
+                operations: status.operations || [],
               } : prev));
 
               setQueue((prev) =>
