@@ -5,6 +5,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import type { Profile, FlowProject, GeneratedImageResult } from '../types';
 import { api } from '../services/api';
 import FlowVideosTab from './FlowVideosTab';
+import ScriptGeneratorTab from './ScriptGeneratorTab';
 import '../styles/App.css';
 
 // Helper to extract filename from path (browser-compatible)
@@ -82,10 +83,9 @@ function Sidebar({ activeTab, onTabChange, totalProfiles, activeSessions, cloakS
     const menuItems = [
         { id: 'profiles', icon: '👤', label: 'Profile Manager' },
         { id: 'flow-projects', icon: '🌊', label: 'Flow Projects' },
-        { id: 'flow-images', icon: '🖼️', label: 'Flow Images' },
-        { id: 'flow-videos', icon: '🎬', label: 'Flow Videos' },
         { id: 'entities', icon: '🎭', label: 'Entity Library' },
-        { id: 'about', icon: '🛡️', label: 'CloakBrowser' },
+        { id: 'script-gen', icon: '✍️', label: 'Sinh Kịch Bản' },
+        { id: 'settings', icon: '⚙️', label: 'Settings' },
     ];
 
     return (
@@ -1780,11 +1780,12 @@ function FlowProjectCard({ project, profile }: FlowProjectCardProps) {
 }
 
 // Flow Projects Tab
-function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetadata, onOpenProfile }: {
+function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetadata, onOpenProfile, onOpenProjectDetail }: {
     profiles: Profile[];
     onCreateProjectsBatch: (data: { profileIds: string[]; name: string; description?: string; toolName?: string }) => Promise<any>;
     onUpdateProfileMetadata: (profileId: string, metadata: Record<string, any>) => Promise<any>;
     onOpenProfile?: (profileId: string, openFlow?: boolean) => Promise<void>;
+    onOpenProjectDetail: (name: string) => void;
 }) {
     const [showModal, setShowModal] = useState(false);
     const [projectName, setProjectName] = useState('');
@@ -1949,8 +1950,8 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
                 ) : (
                     <div className="flow-projects-grid">
                         {groupedProjectsList.map((group) => (
-                            <div key={`${group.name}-${group.projectId}`} className="flow-project-card">
-                                <div className="flow-project-card-header">
+                            <div key={`${group.name}-${group.projectId}`} className="flow-project-card" style={{ cursor: 'pointer' }}>
+                                <div className="flow-project-card-header" onClick={() => onOpenProjectDetail(group.name)}>
                                     <div className="flow-project-icon">🌊</div>
                                     <div className="flow-project-info">
                                         <div className="flow-project-name">{group.name}</div>
@@ -2551,10 +2552,485 @@ function FlowImagesTab({
 }
 
 // Main App
+// Library Placeholder Page
+function LibraryPlaceholderPage({ title, description }: { title: string; description: string }) {
+    return (
+        <>
+            <div className="content-header">
+                <div className="header-left">
+                    <h2><span>📚</span> {title}</h2>
+                </div>
+            </div>
+            <div className="content-body">
+                <div className="empty-state">
+                    <div className="empty-icon">📚</div>
+                    <h3>{title}</h3>
+                    <p>{description}</p>
+                    <div style={{ marginTop: '16px', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                        Tính năng đang được phát triển...
+                    </div>
+                </div>
+            </div>
+        </>
+    );
+}
+
+// Project Detail Page - contains Videos/Images tabs
+interface ProjectDetailPageProps {
+    projectName: string;
+    projectTab: 'videos' | 'images';
+    profiles: Profile[];
+    onUpdateProfileMetadata: (profileId: string, metadata: Record<string, any>) => Promise<any>;
+    onOpenProfile?: (profileId: string, openFlow?: boolean) => Promise<void>;
+    onWaitForProfileReady?: (profileId: string, timeoutMs?: number) => Promise<void>;
+    generatingImage: boolean;
+    lastGeneratedImage: GeneratedImageResult | null;
+    imageError: string | null;
+    generateImage: (data: {
+        profileId: string;
+        prompt: string;
+        projectId?: string;
+        modelKey?: string;
+        aspectRatio?: string;
+        userPaygateTier?: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+        upscaleResolution?: string;
+    }) => Promise<GeneratedImageResult | void>;
+    resetGeneratedImage: () => void;
+    onBack: () => void;
+}
+
+function ProjectDetailPage({
+    projectName,
+    projectTab,
+    profiles,
+    onUpdateProfileMetadata,
+    onOpenProfile,
+    onWaitForProfileReady,
+    generatingImage,
+    lastGeneratedImage,
+    imageError,
+    generateImage,
+    resetGeneratedImage,
+    onBack,
+}: ProjectDetailPageProps) {
+    const [activeProjectTab, setActiveProjectTab] = useState<'videos' | 'images'>(projectTab);
+
+    // Get profiles that have this specific project
+    const projectProfiles = profiles.filter((profile) => {
+        const flowProjects: any[] = (profile.metadata as any)?.flowProjects || [];
+        return flowProjects.some((proj: any) => proj.name === projectName);
+    });
+
+    const getProjectIdx = (profile: Profile) => {
+        const flowProjects: any[] = (profile.metadata as any)?.flowProjects || [];
+        return flowProjects.findIndex((proj: any) => proj.name === projectName);
+    };
+
+    // Project info (from first profile that has it)
+    const firstProfile = projectProfiles[0];
+    const firstProjIdx = firstProfile ? getProjectIdx(firstProfile) : 0;
+    const projectMeta = firstProfile
+        ? ((firstProfile.metadata as any)?.flowProjects || [])[firstProjIdx]
+        : null;
+
+    const getProjectProfilesWithMeta = () => {
+        return projectProfiles.map(profile => {
+            const idx = getProjectIdx(profile);
+            const meta = ((profile.metadata as any)?.flowProjects || [])[idx] || {};
+            return { profile, projectId: meta.projectId };
+        });
+    };
+
+    const projectProfilesWithMeta = getProjectProfilesWithMeta();
+
+    // Delete entire project from all profiles
+    const handleDeleteProject = () => {
+        if (!confirm(`Xóa dự án "${projectName}" khỏi tất cả profiles?`)) return;
+        projectProfilesWithMeta.forEach(({ profile }) => {
+            const metadata = { ...profile.metadata } || {};
+            metadata.flowProjects = (metadata.flowProjects || []).filter(
+                (proj: any) => proj.name !== projectName
+            );
+            onUpdateProfileMetadata(profile.id, metadata);
+        });
+        window.dispatchEvent(new CustomEvent('refresh-profiles'));
+        window.dispatchEvent(new CustomEvent('show-notification', {
+            detail: { message: `Đã xóa project "${projectName}"`, type: 'success' }
+        }));
+    };
+
+    return (
+        <>
+            <div className="project-detail-header">
+                <div className="project-detail-header-top">
+                    <button className="btn btn-ghost" onClick={onBack}>
+                        ← Back
+                    </button>
+                    <div className="project-detail-title">
+                        <h2><span>🌊</span> {projectName}</h2>
+                        {projectMeta?.description && (
+                            <p className="project-detail-desc">{projectMeta.description}</p>
+                        )}
+                    </div>
+                    <div className="project-detail-actions">
+                        <button className="btn btn-danger btn-sm" onClick={handleDeleteProject}>
+                            🗑️ Xóa Project
+                        </button>
+                    </div>
+                </div>
+
+                {/* Project Profiles Summary */}
+                {projectProfilesWithMeta.length > 0 && (
+                    <div className="project-detail-profiles">
+                        {projectProfilesWithMeta.map(({ profile, projectId }) => (
+                            <div key={profile.id} className="project-profile-chip">
+                                <span className={`status-dot ${profile.isActive ? 'active' : ''}`}>●</span>
+                                <span>{profile.name}</span>
+                                <span className="project-id-chip">{projectId ? `#${projectId.substring(0, 8)}` : '(chưa có ID)'}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Project Tab Navigation */}
+            <div className="content-tabs">
+                <button
+                    className={`content-tab ${activeProjectTab === 'videos' ? 'active' : ''}`}
+                    onClick={() => setActiveProjectTab('videos')}
+                >
+                    🎬 Videos
+                </button>
+                <button
+                    className={`content-tab ${activeProjectTab === 'images' ? 'active' : ''}`}
+                    onClick={() => setActiveProjectTab('images')}
+                >
+                    🖼️ Images
+                </button>
+            </div>
+
+            <div className="content-body">
+                {activeProjectTab === 'videos' ? (
+                    <ProjectVideosTab
+                        profiles={projectProfiles}
+                        projectName={projectName}
+                        onOpenProfile={onOpenProfile}
+                        onWaitForProfileReady={onWaitForProfileReady}
+                    />
+                ) : (
+                    <ProjectImagesTab
+                        profiles={projectProfiles}
+                        projectName={projectName}
+                        generating={generatingImage}
+                        lastResult={lastGeneratedImage}
+                        error={imageError}
+                        onGenerateImage={generateImage}
+                        onClearResult={resetGeneratedImage}
+                        onOpenProfile={onOpenProfile}
+                        onWaitForProfileReady={onWaitForProfileReady}
+                    />
+                )}
+            </div>
+        </>
+    );
+}
+
+// Project Videos Tab - renders FlowVideosTab content but scoped to this project's profiles
+function ProjectVideosTab({
+    profiles,
+    projectName,
+    onOpenProfile,
+    onWaitForProfileReady,
+}: {
+    profiles: Profile[];
+    projectName: string;
+    onOpenProfile?: (profileId: string, openFlow?: boolean) => Promise<void>;
+    onWaitForProfileReady?: (profileId: string, timeoutMs?: number) => Promise<void>;
+}) {
+    const getProjectIdx = (profile: Profile) => {
+        const flowProjects: any[] = (profile.metadata as any)?.flowProjects || [];
+        return flowProjects.findIndex((proj: any) => proj.name === projectName);
+    };
+
+    if (profiles.length === 0) {
+        return (
+            <div className="empty-state">
+                <div className="empty-icon">🎬</div>
+                <h3>Chưa có Profile nào trong dự án</h3>
+                <p>Hãy thêm profile vào dự án "{projectName}" trước.</p>
+            </div>
+        );
+    }
+
+    return (
+        <FlowVideosTab
+            profiles={profiles}
+            projectName={projectName}
+            onOpenProfile={onOpenProfile}
+            onWaitForProfileReady={onWaitForProfileReady}
+        />
+    );
+}
+
+// Project Images Tab - renders FlowImagesTab content but scoped to this project's profiles
+function ProjectImagesTab({
+    profiles,
+    projectName,
+    generating,
+    lastResult,
+    error,
+    onGenerateImage,
+    onClearResult,
+    onOpenProfile,
+    onWaitForProfileReady,
+}: {
+    profiles: Profile[];
+    projectName: string;
+    generating: boolean;
+    lastResult: GeneratedImageResult | null;
+    error: string | null;
+    onGenerateImage: (data: {
+        profileId: string;
+        prompt: string;
+        projectId?: string;
+        modelKey?: string;
+        aspectRatio?: string;
+        userPaygateTier?: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+        upscaleResolution?: string;
+    }) => Promise<GeneratedImageResult | void>;
+    onClearResult: () => void;
+    onOpenProfile?: (profileId: string) => Promise<void>;
+    onWaitForProfileReady?: (profileId: string, timeoutMs?: number) => Promise<void>;
+}) {
+    const [selectedProfileIdx, setSelectedProfileIdx] = useState(0);
+    const [prompt, setPrompt] = useState('');
+    const [modelKey, setModelKey] = useState('NANO_BANANA_PRO');
+    const [aspectRatio, setAspectRatio] = useState('IMAGE_ASPECT_RATIO_LANDSCAPE');
+    const [upscaleResolution, setUpscaleResolution] = useState('UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL');
+    const [submitting, setSubmitting] = useState(false);
+
+    const selectedProfile = profiles[selectedProfileIdx];
+    const getProjectIdx = (profile: Profile) => {
+        const flowProjects: any[] = (profile.metadata as any)?.flowProjects || [];
+        return flowProjects.findIndex((proj: any) => proj.name === projectName);
+    };
+    const selectedProjectIdx = selectedProfile ? getProjectIdx(selectedProfile) : 0;
+    const selectedProjectObj = selectedProfile
+        ? ((selectedProfile.metadata as any)?.flowProjects || [])[selectedProjectIdx]
+        : null;
+
+    const handleSubmit = async () => {
+        if (!selectedProfile || !prompt.trim() || submitting) return;
+        setSubmitting(true);
+        try {
+            if (selectedProfile.status !== 'running' && onOpenProfile) {
+                try { await onOpenProfile(selectedProfile.id); } catch (e) { console.warn('Auto-open failed:', e); }
+            }
+            if (onWaitForProfileReady) {
+                try { await onWaitForProfileReady(selectedProfile.id, 30000); } catch (e) { console.warn('Profile not ready:', e); }
+            }
+            await onGenerateImage({
+                profileId: selectedProfile.id,
+                prompt: prompt.trim(),
+                projectId: selectedProjectObj?.projectId,
+                modelKey,
+                aspectRatio,
+                upscaleResolution,
+            });
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    if (profiles.length === 0) {
+        return (
+            <div className="empty-state">
+                <div className="empty-icon">🖼️</div>
+                <h3>Chưa có Profile nào</h3>
+            </div>
+        );
+    }
+
+    return (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }}>
+            <div className="profile-card">
+                <div className="profile-header">
+                    <div className="profile-title">
+                        <div className="profile-avatar">🖼️</div>
+                        <div>
+                            <div className="profile-name">Tạo ảnh mới</div>
+                            <div className="profile-id">{projectName}</div>
+                        </div>
+                    </div>
+                </div>
+                <div className="profile-meta" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                    <div className="form-group">
+                        <label className="form-label">Profile</label>
+                        <select
+                            className="form-input"
+                            value={selectedProfileIdx}
+                            onChange={(e) => setSelectedProfileIdx(Number(e.target.value))}
+                        >
+                            {profiles.map((p, idx) => (
+                                <option key={p.id} value={idx}>
+                                    {p.name} (Tier: {p.tier || 'N/A'})
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    {selectedProfile && (
+                        <div style={{ padding: '10px 12px', background: 'var(--bg-secondary)', borderRadius: '8px', fontSize: '0.85rem' }}>
+                            <div><strong>Profile:</strong> {selectedProfile.name}</div>
+                            <div><strong>Tier:</strong> {selectedProfile.tier || 'N/A'}</div>
+                            <div><strong>Project ID:</strong> <code>{selectedProjectObj?.projectId || '(chưa có)'}</code></div>
+                        </div>
+                    )}
+                    <div className="form-group">
+                        <label className="form-label">Prompt</label>
+                        <textarea
+                            className="form-input"
+                            rows={3}
+                            placeholder="Mô tả ảnh bạn muốn tạo..."
+                            value={prompt}
+                            onChange={(e) => setPrompt(e.target.value)}
+                        />
+                    </div>
+                    <div className="form-group">
+                        <label className="form-label">Model</label>
+                        <select className="form-input" value={modelKey} onChange={(e) => setModelKey(e.target.value)}>
+                            <option value="NANO_BANANA_PRO">🍌 Nano Banana Pro</option>
+                            <option value="IMAGE_GENERATION_V2">🎨 Image V2</option>
+                            <option value="IMAGE_GENERATION_V3">🎨 Image V3</option>
+                        </select>
+                    </div>
+                    <div className="form-group">
+                        <label className="form-label">Aspect Ratio</label>
+                        <select className="form-input" value={aspectRatio} onChange={(e) => setAspectRatio(e.target.value)}>
+                            <option value="IMAGE_ASPECT_RATIO_LANDSCAPE">🖼️ Landscape (16:9)</option>
+                            <option value="IMAGE_ASPECT_RATIO_PORTRAIT">📱 Portrait (9:16)</option>
+                            <option value="IMAGE_ASPECT_RATIO_SQUARE">⬜ Square (1:1)</option>
+                        </select>
+                    </div>
+
+                    <div className="form-group">
+                        <label className="form-label">Upscale Resolution</label>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
+                            <div
+                                onClick={() => setUpscaleResolution('UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL')}
+                                style={{
+                                    padding: '8px 6px',
+                                    borderRadius: '8px',
+                                    background: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' ? '#6366f1' : 'var(--bg-secondary)',
+                                    color: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' ? 'white' : 'var(--text)',
+                                    cursor: 'pointer',
+                                    textAlign: 'center',
+                                    transition: 'all 0.2s',
+                                    border: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' ? '2px solid #6366f1' : '2px solid transparent',
+                                }}
+                            >
+                                <div style={{ fontSize: '1rem' }}>📷</div>
+                                <div style={{ fontSize: '0.7rem' }}>Original</div>
+                            </div>
+                            <div
+                                onClick={() => setUpscaleResolution('UPSAMPLE_IMAGE_RESOLUTION_2K')}
+                                style={{
+                                    padding: '8px 6px',
+                                    borderRadius: '8px',
+                                    background: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_2K' ? '#22c55e' : 'var(--bg-secondary)',
+                                    color: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_2K' ? 'white' : 'var(--text)',
+                                    cursor: 'pointer',
+                                    textAlign: 'center',
+                                    transition: 'all 0.2s',
+                                    border: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_2K' ? '2px solid #22c55e' : '2px solid transparent',
+                                }}
+                            >
+                                <div style={{ fontSize: '1rem' }}>🖼️</div>
+                                <div style={{ fontSize: '0.7rem' }}>2K</div>
+                            </div>
+                            <div
+                                onClick={() => setUpscaleResolution('UPSAMPLE_IMAGE_RESOLUTION_4K')}
+                                style={{
+                                    padding: '8px 6px',
+                                    borderRadius: '8px',
+                                    background: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '#f59e0b' : 'var(--bg-secondary)',
+                                    color: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? 'white' : 'var(--text)',
+                                    cursor: 'pointer',
+                                    textAlign: 'center',
+                                    transition: 'all 0.2s',
+                                    border: upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '2px solid #f59e0b' : '2px solid transparent',
+                                }}
+                            >
+                                <div style={{ fontSize: '1rem' }}>🏔️</div>
+                                <div style={{ fontSize: '0.7rem' }}>4K</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                            className="btn btn-primary"
+                            onClick={handleSubmit}
+                            disabled={!selectedProfile || !prompt.trim() || submitting || generating}
+                        >
+                            {generating ? '⏳ Đang tạo...' : '🚀 Tạo ảnh'}
+                        </button>
+                        <button className="btn btn-ghost" onClick={onClearResult}>🗑️ Xoá</button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Result Panel */}
+            <div className="profile-card">
+                <div className="profile-header">
+                    <div className="profile-title">
+                        <div className="profile-avatar">📸</div>
+                        <div>
+                            <div className="profile-name">Kết quả</div>
+                            <div className="profile-id">
+                                {generating ? '⏳ Đang xử lý...' : lastResult ? '✓ Hoàn thành' : 'Chưa có kết quả'}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div style={{ padding: '12px' }}>
+                    {error && (
+                        <div style={{ color: 'var(--error)', padding: '12px', background: 'rgba(255,0,0,0.1)', borderRadius: '8px', marginBottom: '12px' }}>
+                            ⚠️ {error}
+                        </div>
+                    )}
+                    {lastResult ? (
+                        <div>
+                            {(lastResult.servingUri || lastResult.downloadUrl || lastResult.localPath) ? (
+                                <img
+                                    src={lastResult.servingUri || lastResult.downloadUrl || lastResult.localPath || ''}
+                                    alt="Generated"
+                                    style={{ width: '100%', borderRadius: '8px', cursor: 'pointer' }}
+                                    onClick={() => window.open(lastResult.servingUri || lastResult.downloadUrl || lastResult.localPath || '#', '_blank')}
+                                />
+                            ) : null}
+                            <div style={{ marginTop: '12px', padding: '10px', background: 'var(--bg-secondary)', borderRadius: '8px', fontSize: '0.85rem' }}>
+                                <div><strong>Model:</strong> {lastResult.modelKey}</div>
+                                <div><strong>Aspect:</strong> {lastResult.aspectRatio}</div>
+                                <div><strong>Media ID:</strong> <code>{lastResult.mediaId || 'N/A'}</code></div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div style={{ color: 'var(--text-secondary)', textAlign: 'center', padding: '40px 0' }}>
+                            <div style={{ fontSize: '3rem', marginBottom: '12px' }}>🖼️</div>
+                            <p>Chưa có kết quả. Tạo ảnh để xem ở đây.</p>
+                        </div>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+}
+
 export default function App() {
     const [activeTab, setActiveTab] = useState('profiles');
     const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
     const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
+    const [activeProject, setActiveProject] = useState<string | null>(null);
 
     const { profiles, loading, creating: creatingProfile, loadProfiles, createProfile, updateProfile, deleteProfile, openProfile, closeProfile, saveSession, refreshTier, setProxy, createFlowProjectsBatch, waitForProfileReady } = useProfiles();
     const { status: cloakStatus } = useCloakBrowser();
@@ -2735,17 +3211,40 @@ export default function App() {
 
     const activeCount = profiles.filter((p: Profile) => p.isActive).length;
 
+    const isProjectTab = (tab: string) => tab.startsWith('project:');
+
+    const handleTabChange = (tab: string) => {
+        setActiveTab(tab);
+        setActiveProject(isProjectTab(tab) ? tab.replace('project:', '') : null);
+    };
+
+    const handleOpenProjectDetail = (name: string) => {
+        setActiveProject(name);
+        setActiveTab(`project:${name}`);
+    };
+
+    const handleBackToProjects = () => {
+        setActiveProject(null);
+        setActiveTab('flow-projects');
+    };
+
+    // Get the project-specific tab (Videos/Images) within a project
+    const activeProjectTab = isProjectTab(activeTab)
+        ? (activeTab.split(':').pop() as 'videos' | 'images' || 'videos')
+        : 'videos';
+
     return (
         <div className="app-container">
             <Sidebar
                 activeTab={activeTab}
-                onTabChange={setActiveTab}
+                onTabChange={handleTabChange}
                 totalProfiles={profiles.length}
                 activeSessions={activeCount}
                 cloakStatus={cloakStatus}
             />
 
             <div className="main-content">
+                {/* Profile Manager */}
                 <div className={`tab-content ${activeTab === 'profiles' ? 'active' : ''}`}>
                     <ProfilesTab
                         profiles={profiles}
@@ -2762,41 +3261,47 @@ export default function App() {
                     />
                 </div>
 
+                {/* Flow Projects - grid list */}
                 <div className={`tab-content ${activeTab === 'flow-projects' ? 'active' : ''}`}>
                     <FlowProjectsTab
                         profiles={profiles}
                         onCreateProjectsBatch={handleCreateFlowProjectsBatch}
                         onUpdateProfileMetadata={handleUpdateProfileMetadata}
                         onOpenProfile={handleOpenProfile}
+                        onOpenProjectDetail={handleOpenProjectDetail}
                     />
                 </div>
 
-                <div className={`tab-content ${activeTab === 'flow-images' ? 'active' : ''}`}>
-                    <FlowImagesTab
+                {/* Project Detail - with Videos/Images tabs */}
+                {isProjectTab(activeTab) && activeProject && (
+                    <ProjectDetailPage
+                        projectName={activeProject}
+                        projectTab={activeProjectTab}
                         profiles={profiles}
-                        onGenerateImage={generateImage}
-                        generating={generatingImage}
-                        lastResult={lastGeneratedImage}
-                        error={imageError}
-                        onClearResult={resetGeneratedImage}
+                        onUpdateProfileMetadata={handleUpdateProfileMetadata}
                         onOpenProfile={openProfile}
                         onWaitForProfileReady={waitForProfileReady}
+                        generatingImage={generatingImage}
+                        lastGeneratedImage={lastGeneratedImage}
+                        imageError={imageError}
+                        generateImage={generateImage}
+                        resetGeneratedImage={resetGeneratedImage}
+                        onBack={handleBackToProjects}
                     />
-                </div>
+                )}
 
-                <div className={`tab-content ${activeTab === 'flow-videos' ? 'active' : ''}`}>
-                    <FlowVideosTab
-                        profiles={profiles}
-                        onOpenProfile={openProfile}
-                        onWaitForProfileReady={waitForProfileReady}
-                    />
-                </div>
-
+                {/* Entity Library */}
                 <div className={`tab-content ${activeTab === 'entities' ? 'active' : ''}`}>
                     <EntitiesTab profiles={profiles} onOpenProfile={openProfile} onWaitForProfileReady={waitForProfileReady} onOpenLightbox={(src, alt) => setLightbox({ src, alt })} />
                 </div>
 
-                <div className={`tab-content ${activeTab === 'about' ? 'active' : ''}`}>
+                {/* Script Generator */}
+                <div className={`tab-content ${activeTab === 'script-gen' ? 'active' : ''}`}>
+                    <ScriptGeneratorTab />
+                </div>
+
+                {/* Settings */}
+                <div className={`tab-content ${activeTab === 'settings' ? 'active' : ''}`}>
                     <AboutTab cloakStatus={cloakStatus} />
                 </div>
             </div>

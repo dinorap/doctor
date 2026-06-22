@@ -123,6 +123,7 @@ class ApiService {
     modelKey?: string;
     aspectRatio?: string;
     userPaygateTier?: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+    upscaleResolution?: string;
   }): Promise<GeneratedImageResult> {
     return this.request<GeneratedImageResult>('/api/flow/images/generate', {
       method: 'POST',
@@ -173,6 +174,13 @@ class ApiService {
     });
   }
 
+  async uploadLibraryEntityImage(entityId: string, profileId: string, projectId: string): Promise<{ entityId: string; originalMediaId: string; newMediaId: string; fileName: string }> {
+    return this.request<{ entityId: string; originalMediaId: string; newMediaId: string; fileName: string }>('/api/library/entities/' + entityId + '/upload', {
+      method: 'POST',
+      body: JSON.stringify({ profileId, projectId }),
+    });
+  }
+
   async generateFlowVideo(data: VideoGenerationRequest): Promise<GeneratedVideoResult> {
     return this.request<GeneratedVideoResult>('/api/flow/videos/generate', {
       method: 'POST',
@@ -202,6 +210,56 @@ class ApiService {
   async getEntities(profileId?: string): Promise<any[]> {
     const qs = profileId ? `?profileId=${encodeURIComponent(profileId)}` : '';
     return this.request<any[]>('/api/entities' + qs);
+  }
+
+  // Script Generation
+  async generateScript(data: {
+    input_type: 'youtube_url' | 'topic' | 'upload_files';
+    youtube_url?: string;
+    topic?: string;
+    upload_files?: string[];
+    language?: string;
+    duration_minutes?: number;
+    copy_ratio?: number;
+    additional_description?: string;
+    gemini_api_keys?: string;
+    gemini_model?: string;
+    temperature?: number;
+    no_voice?: boolean;
+    no_music?: boolean;
+  }): Promise<{
+    title: string;
+    topic: string;
+    duration_seconds: number;
+    total_scenes: number;
+    summary?: string;
+    style_notes?: string;
+    scenes: {
+      scene_id: number;
+      scene_title: string;
+      description: string;
+      image_prompt: string;
+      tts_script: string;
+      duration_seconds: number;
+      suggested_visual?: string;
+      transition?: string;
+    }[];
+  }> {
+    return this.request('/api/scripts/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getGeminiSettings(): Promise<{ apiKeys: string; model: string; updatedAt: string }> {
+    return this.request('/api/gemini-settings');
+  }
+
+  async saveGeminiSettings(data: { apiKeys: string; model: string }): Promise<{ apiKeys: string; model: string; updatedAt: string }> {
+    return this.request('/api/gemini-settings', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
   }
 }
 

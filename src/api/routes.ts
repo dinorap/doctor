@@ -599,6 +599,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
             modelKey,
             aspectRatio,
             userPaygateTier,
+            upscaleResolution,
         } = req.body || {};
 
         if (!profileId || typeof profileId !== 'string') {
@@ -783,16 +784,13 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
 
         // Download image to local storage if we have a URL
         let localPath: string | null = null;
+        const imagesDir = path.join(process.cwd(), 'data', 'generated-images');
+        if (!fs.existsSync(imagesDir)) {
+            fs.mkdirSync(imagesDir, { recursive: true });
+        }
+        const ext = servingUri?.includes('.png') ? 'png' : 'jpg';
         if (servingUri && mediaId) {
             try {
-                // Create images directory if it doesn't exist
-                const imagesDir = path.join(process.cwd(), 'data', 'generated-images');
-                if (!fs.existsSync(imagesDir)) {
-                    fs.mkdirSync(imagesDir, { recursive: true });
-                }
-
-                // Determine file extension from URL or default to jpg
-                const ext = servingUri.includes('.png') ? 'png' : 'jpg';
                 localPath = path.join(imagesDir, `${mediaId}.${ext}`);
 
                 // Download the image using the native fetch API (Node 18+)
@@ -811,6 +809,58 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
             }
         }
 
+        // Upscale if requested (2K or 4K)
+        if (upscaleResolution && upscaleResolution !== 'UPSAMPLE_IMAGE_RESOLUTION_ORIGINAL' && mediaId && bridge && bridge.isConnected()) {
+            try {
+                logger.info(`Upscaling image ${mediaId} to ${upscaleResolution}`);
+                const upscaleResponse = await bridge.upscaleImage({
+                    mediaId,
+                    targetResolution: upscaleResolution,
+                    projectId: targetProjectId,
+                    userPaygateTier: resolvedTier,
+                });
+
+                const bridgeResponse = upscaleResponse?.json ?? upscaleResponse;
+                const encodedImage = bridgeResponse?.encodedImage;
+                const opMetadata = (bridgeResponse?.metadata || {}) as any;
+                const imageMeta = opMetadata.image || {};
+                const fifeUrl = imageMeta.fifeUrl;
+                const opName = bridgeResponse?.name;
+                const opDone = bridgeResponse?.done;
+
+                if (encodedImage) {
+                    const upscaleSuffix = upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '_4k' : '_2k';
+                    const newMediaId = mediaId + upscaleSuffix;
+                    const upscalePath = path.join(imagesDir, `${newMediaId}.${ext}`);
+                    if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
+                    const imageBuffer = Buffer.from(encodedImage, 'base64');
+                    fs.writeFileSync(upscalePath, imageBuffer);
+                    mediaId = newMediaId;
+                    servingUri = null;
+                    localPath = upscalePath;
+                    logger.info(`Image upscaled (base64) and saved: ${upscalePath}`);
+                } else if (opDone && fifeUrl) {
+                    const upscaleSuffix = upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '_4k' : '_2k';
+                    const newMediaId = mediaId + upscaleSuffix;
+                    const upscalePath = path.join(imagesDir, `${newMediaId}.${ext}`);
+                    if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
+                    const imageResponse = await fetch(fifeUrl);
+                    if (imageResponse.ok) {
+                        const buffer = await imageResponse.arrayBuffer();
+                        fs.writeFileSync(upscalePath, Buffer.from(buffer));
+                        servingUri = fifeUrl;
+                        localPath = upscalePath;
+                        mediaId = newMediaId;
+                        logger.info(`Image upscaled (URL) and saved: ${upscalePath}`);
+                    }
+                } else if (opName && !opDone) {
+                    logger.info(`Upscale operation started: ${opName} (async)`);
+                }
+            } catch (upscaleError: any) {
+                logger.warn(`Image upscale failed (will use original): ${upscaleError.message}`);
+            }
+        }
+
         res.json({
             success: true,
             data: {
@@ -825,7 +875,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
                 localPath,
                 rawResult: result,
             },
-            message: usedBridge ? 'T?o ?nh th?nh c?ng qua Extension' : 'T?o ?nh th?nh c?ng qua Flow API',
+            message: usedBridge ? 'Tạo ảnh thành công' : 'Tạo ảnh thành công qua Flow API',
         });
     } catch (error: any) {
         logger.error('Error generating Flow image:', error);
@@ -1783,6 +1833,147 @@ router.get('/entities/:id', (req: Request, res: Response) => {
 });
 
 /**
+ * POST /library/entities/:id/upload - Upload library entity image to Flow and return new mediaId
+ * Simple: just find the file and upload using existing flow endpoint
+ */
+router.post('/library/entities/:id/upload', async (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const profileManager = new ProfileManager(db);
+        const { profileId, projectId } = req.body || {};
+        const entityId = req.params.id;
+
+        if (!profileId || !projectId) {
+            return res.status(400).json({
+                success: false,
+                error: 'profileId and projectId are required',
+            });
+        }
+
+        const profile = profileManager.getProfile(profileId);
+        if (!profile) {
+            return res.status(404).json({ success: false, error: 'Profile not found' });
+        }
+
+        // Try to get entity from DB
+        const entity = db.getEntityReference(entityId);
+        
+        // Determine filePath - check multiple possible locations
+        let filePath: string | undefined;
+        let originalMediaId = '';
+        let fileName = `${entityId}.jpg`;
+
+        if (entity) {
+            // Use localPath from DB entity
+            if (entity.localPath && fs.existsSync(entity.localPath)) {
+                filePath = entity.localPath;
+            }
+            // Try remoteUrl
+            if (!filePath && entity.remoteUrl) {
+                const possiblePath = path.join(process.cwd(), entity.remoteUrl);
+                if (fs.existsSync(possiblePath)) {
+                    filePath = possiblePath;
+                }
+            }
+            originalMediaId = entity.mediaId || '';
+            fileName = path.basename(filePath || fileName);
+        }
+
+        // If not found, try to find file directly in data/entity-references directories
+        if (!filePath) {
+            const entitiesBaseDir = path.join(process.cwd(), 'data', 'entity-references');
+            const searchForFile = (dir: string): string | null => {
+                try {
+                    const entries = fs.readdirSync(dir, { withFileTypes: true });
+                    for (const entry of entries) {
+                        const fullPath = path.join(dir, entry.name);
+                        if (entry.isDirectory()) {
+                            const found = searchForFile(fullPath);
+                            if (found) return found;
+                        } else if (entry.isFile() && (
+                            entry.name === `${entityId}.jpg` || 
+                            entry.name === `${entityId}.png` || 
+                            entry.name === `${entityId}.jpeg`
+                        )) {
+                            return fullPath;
+                        }
+                    }
+                } catch (e) {}
+                return null;
+            };
+            filePath = searchForFile(entitiesBaseDir) || undefined;
+            originalMediaId = entityId;
+            if (filePath) {
+                fileName = path.basename(filePath);
+            }
+        }
+
+        if (!filePath) {
+            return res.status(404).json({
+                success: false,
+                error: `Image file not found for entity ${entityId}`,
+            });
+        }
+
+        logger.info(`[Library Upload] Uploading entity ${entityId} from ${filePath}`);
+
+        // Use the existing upload endpoint logic directly
+        const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
+        const flowRegistry = (req.app.locals as any).flowRegistry as FlowApiRegistry | undefined;
+        const bridge = extensionRegistry?.get(profileId);
+        const flowClient = flowRegistry?.getOrCreate(profileId);
+        const uploadSceneId = `library-upload-${Date.now()}`;
+
+        let uploadResult: any = null;
+
+        if (bridge && bridge.isConnected()) {
+            uploadResult = await bridge.uploadImage({
+                filePath,
+                fileName,
+                projectId,
+                sceneId: uploadSceneId,
+            });
+        } else if (flowClient) {
+            uploadResult = await flowClient.uploadImage({
+                filePath,
+                fileName,
+                projectId,
+                sceneId: uploadSceneId,
+            });
+        }
+
+        // Extract mediaId - result has data.media.name or _mediaId
+        const newMediaId = uploadResult?.data?.media?.name || uploadResult?._mediaId;
+        if (!newMediaId) {
+            logger.error('[Library Upload] Upload failed:', uploadResult);
+            return res.status(500).json({
+                success: false,
+                error: 'Failed to upload image to Flow',
+                rawResult: uploadResult,
+            });
+        }
+
+        logger.info(`[Library Upload] Success - new mediaId: ${newMediaId}`);
+
+        res.json({
+            success: true,
+            data: {
+                entityId,
+                originalMediaId,
+                newMediaId,
+                fileName,
+            },
+        });
+    } catch (error: any) {
+        logger.error('[Library Upload] Error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message,
+        });
+    }
+});
+
+/**
  * GET /library/entities - List entities grouped by type for Library UI
  */
 router.get('/library/entities', (req: Request, res: Response) => {
@@ -2540,8 +2731,6 @@ function buildEntityPrompt(name: string, description: string | undefined, entity
     return `Comprehensive ${sheetName} for ${baseDesc}. ${stylePrompt} ${compositionPrompt} Studio lighting, highly detailed, global illumination.`;
 }
 
-export default router;
-
 /**
  * POST /flow/videos/upload-image - Upload an image to use as start/end image for video generation
  * Body: { profileId, projectId, sceneId?, filePath?, fileName?, fileData? (base64) }
@@ -2714,6 +2903,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
             endImageMediaId,
             modelKey,
             duration,
+            referenceAudio,
         } = req.body || {};
 
         if (!profileId || typeof profileId !== 'string') {
@@ -2778,6 +2968,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                         aspectRatio: resolvedAspectRatio,
                         userPaygateTier: resolvedTier,
                         videoModelKey: resolvedModelKey,
+                        referenceAudio,
                     });
                 } else if (mode === 'start_image') {
                     result = await bridge.generateVideo({
@@ -2789,6 +2980,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                         endImageMediaId,
                         userPaygateTier: resolvedTier,
                         videoModelKey: resolvedModelKey,
+                        referenceAudio,
                     });
                 } else {
                     result = await bridge.generateVideoFromReferences({
@@ -2799,6 +2991,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                         aspectRatio: resolvedAspectRatio,
                         userPaygateTier: resolvedTier,
                         videoModelKey: resolvedModelKey,
+                        referenceAudio,
                     });
                 }
                 usedBridge = true;
@@ -2824,6 +3017,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                     aspectRatio: resolvedAspectRatio,
                     userPaygateTier: resolvedTier,
                     videoModelKey: resolvedModelKey,
+                    referenceAudio,
                 });
             } else if (mode === 'start_image') {
                 result = await flowClient.generateVideo({
@@ -2835,6 +3029,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                     endImageMediaId,
                     userPaygateTier: resolvedTier,
                     videoModelKey: resolvedModelKey,
+                    referenceAudio,
                 });
             } else {
                 result = await flowClient.generateVideoFromReferences({
@@ -2845,6 +3040,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                     aspectRatio: resolvedAspectRatio,
                     userPaygateTier: resolvedTier,
                     videoModelKey: resolvedModelKey,
+                    referenceAudio,
                 });
             }
         }
@@ -3313,6 +3509,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
         const completedVideos = [];
         let hasActiveMedia = false;
         let hasSuccessfulMedia = false;
+        let hasFailedMedia = false;
 
         for (const item of rawMedia) {
             if (!item) continue;
@@ -3324,6 +3521,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
             
             // Also check video status
             const videoStatus = item?.video?.status;
+            const videoError = item?.video?.error || item?.error || mediaMetadata?.error;
 
             // Check if still processing
             if (statusStr === 'MEDIA_GENERATION_STATUS_ACTIVE' || 
@@ -3331,6 +3529,16 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                 videoStatus === 'MEDIA_GENERATION_STATUS_ACTIVE' ||
                 videoStatus === 'MEDIA_GENERATION_STATUS_PENDING') {
                 hasActiveMedia = true;
+            }
+            
+            // Check if FAILED
+            const isFailed = statusStr === 'MEDIA_GENERATION_STATUS_FAILED' ||
+                videoStatus === 'MEDIA_GENERATION_STATUS_FAILED' ||
+                videoError ||
+                item.status === 'FAILED';
+            if (isFailed) {
+                hasFailedMedia = true;
+                logger.warn(`[Video Status] Media ${item.name} FAILED:`, { statusStr, videoStatus, videoError });
             }
             
             // Check if SUCCESSFUL - video is ready to download
@@ -3388,7 +3596,8 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
         }
         
         // isComplete = has successful/ready videos and no active processing
-        const isComplete = (completedVideos.length > 0 || hasSuccessfulMedia) && !hasActiveMedia;
+        // Also complete if all media has failed
+        const isComplete = ((completedVideos.length > 0 || hasSuccessfulMedia || hasFailedMedia) && !hasActiveMedia) || hasFailedMedia;
 
         // === AUTO-PROBE: When isComplete is true, immediately call GET /v1/media/{mediaId}
         // EXACT same pattern as checkVideoStatus - extension fetches via
@@ -3473,15 +3682,302 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                 isComplete,
                 hasActiveMedia,
                 hasSuccessfulMedia,
+                hasFailedMedia,
                 autoDownloadResult,
                 shouldStopPolling: isComplete,
-                stopReason: isComplete ? 'Video generation completed (SUCCESSFUL)' : null,
+                stopReason: hasFailedMedia ? 'Video generation FAILED' : (isComplete ? 'Video generation completed' : null),
             },
             message: usedBridge ? 'Kiểm tra trạng thái qua Extension' : 'Kiểm tra trạng thái qua Flow API',
         });
-        logger.info(`[Video Status] RESPONSE: success=true, isComplete=${isComplete}, hasSuccessfulMedia=${hasSuccessfulMedia}, completedVideos=${completedVideos.length}, shouldStopPolling=${isComplete}`);
+        logger.info(`[Video Status] RESPONSE: success=true, isComplete=${isComplete}, hasSuccessfulMedia=${hasSuccessfulMedia}, hasFailedMedia=${hasFailedMedia}, completedVideos=${completedVideos.length}, shouldStopPolling=${isComplete}`);
     } catch (error: any) {
         logger.error('Error checking Flow video status:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
+
+// =============================================================================
+// GEMINI SETTINGS API
+// =============================================================================
+
+import { loadGeminiSettings, saveGeminiSettings, GeminiSettings } from './geminiSettings';
+
+router.get('/gemini-settings', (_req, res) => {
+    const settings = loadGeminiSettings();
+    res.json({ success: true, data: settings });
+});
+
+router.post('/gemini-settings', (req, res) => {
+    const { apiKeys, model } = req.body as Partial<GeminiSettings>;
+    const saved = saveGeminiSettings({
+        apiKeys: typeof apiKeys === 'string' ? apiKeys : undefined,
+        model: typeof model === 'string' ? model : undefined,
+    });
+    res.json({ success: true, data: saved });
+});
+
+// =============================================================================
+// SCRIPT GENERATION - Gemini API
+// =============================================================================
+
+async function importGenai() {
+    try {
+        const genai = await import('@google/genai');
+        return genai;
+    } catch (e) { return null; }
+}
+
+function parseLLMJsonOutput(rawText: string): any {
+    if (!rawText) return null;
+    let s = String(rawText).trim();
+    if (s.startsWith('\ufeff')) s = s.slice(1).trim();
+    try { return JSON.parse(s); } catch { /* next */ }
+    const m = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (m) { try { return JSON.parse(m[1].trim()); } catch { /* next */ } }
+    for (const ch of ['{', '[']) {
+        const pos = s.indexOf(ch);
+        if (pos >= 0) { try { return JSON.parse(s.slice(pos)); } catch { /* continue */ } }
+    }
+    return null;
+}
+
+function isGeminiOverload(errMsg?: string): boolean {
+    if (!errMsg) return false;
+    const s = errMsg.toLowerCase();
+    return ['503', 'unavailable', 'high demand', 'temporarily', 'try again', 'service unavailable', 'overload', 'rate limit', '429', 'resou'].some(n => s.includes(n));
+}
+
+router.post('/scripts/generate', async (req: Request, res: Response) => {
+    const {
+        input_type,
+        youtube_url,
+        topic,
+        upload_files,
+        language = 'vi',
+        duration_text = '60',
+        copy_ratio = 90,
+        additional_description = '',
+        gemini_model,
+        gemini_api_keys,
+        temperature = 0.7,
+        no_voice = false,
+        no_music = false,
+    } = req.body;
+
+    // === Load prompt config ===
+    const scriptConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'script_prompts.json'), 'utf-8'));
+
+    // Duration: phút -> giây
+    const durationMinutes = Number(req.body.duration_minutes ?? 10);
+    const durationSeconds = Math.round(durationMinutes * 60);
+
+    const durationLabel = durationSeconds >= 3600
+        ? `${durationSeconds / 3600} giờ (${Math.round(durationSeconds / 60)} phút)`
+        : `${durationMinutes} phút`;
+
+    const sceneCount = Math.ceil(durationSeconds / 8);
+
+    // === Multi-key rotation ===
+    const ALLOWED_GEMINI_MODELS = [
+        'models/gemini-3.5-flash',
+        'models/gemini-3-flash-preview',
+        'models/gemini-3.1-flash-lite-preview',
+        'models/gemini-2.5-flash',
+        'models/gemini-2.5-flash-lite',
+    ];
+    const MODEL_ALIASES: Record<string, string> = {
+        'gemini-3.5-flash': 'models/gemini-3.5-flash',
+        'gemini-3-flash-preview': 'models/gemini-3-flash-preview',
+        'gemini-3.1-flash-lite': 'models/gemini-3.1-flash-lite-preview',
+        'gemini-3.1-flash-lite-preview': 'models/gemini-3.1-flash-lite-preview',
+        'gemini-2.5-flash': 'models/gemini-2.5-flash',
+        'gemini-2.5-flash-lite': 'models/gemini-2.5-flash-lite',
+    };
+    const DEFAULT_MODEL = 'models/gemini-2.5-flash';
+
+    function splitKeyString(raw: string): string[] {
+        const parts = raw.split(/[\n;,]+/).map((p: string) => p.trim()).filter(Boolean);
+        const seen = new Set<string>();
+        return parts.filter((k: string) => {
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+        });
+    }
+
+    function normalizeModel(raw?: string): string {
+        const s = (raw || '').trim();
+        if (ALLOWED_GEMINI_MODELS.includes(s)) return s;
+        if (s in MODEL_ALIASES) return MODEL_ALIASES[s];
+        if (!s.startsWith('models/') && s) {
+            const prefixed = `models/${s}`;
+            if (ALLOWED_GEMINI_MODELS.includes(prefixed)) return prefixed;
+        }
+        return DEFAULT_MODEL;
+    }
+
+    function getGeminiApiKeys(): string[] {
+        // Priority: request body > persistent settings > env
+        if (gemini_api_keys?.trim()) return splitKeyString(gemini_api_keys);
+        const saved = loadGeminiSettings();
+        if (saved.apiKeys?.trim()) return splitKeyString(saved.apiKeys);
+        const envMulti = process.env.GEMINI_API_KEYS;
+        if (envMulti?.trim()) return splitKeyString(envMulti);
+        const envSingle = process.env.GEMINI_API_KEY;
+        if (envSingle?.trim()) return splitKeyString(envSingle);
+        return [];
+    }
+
+    function getGeminiModel(): string {
+        if (gemini_model?.trim()) return normalizeModel(gemini_model);
+        const saved = loadGeminiSettings();
+        if (saved.model?.trim()) return normalizeModel(saved.model);
+        return DEFAULT_MODEL;
+    }
+
+    if (!input_type || !['youtube_url', 'topic', 'upload_files'].includes(input_type)) {
+        return res.status(400).json({ success: false, error: 'Thiếu hoặc sai input_type' });
+    }
+
+    const langMap: Record<string, string> = {
+        vi: 'Vietnamese', en: 'English', fr: 'French', de: 'German', ru: 'Russian',
+        ja: 'Japanese', ko: 'Korean', zh: 'Chinese', hi: 'Hindi', it: 'Italian',
+        es: 'Spanish', pt: 'Portuguese',
+    };
+    const targetLang = langMap[language] || 'Vietnamese';
+
+    // Optional modifiers
+    const voiceNote = no_voice
+        ? '\nQUAN TRỌNG: KHÔNG CÓ THOẠI. Tất cả các cảnh phải HOÀN TOÀN IM LẶNG. Không viết bất kỳ dialogue, narration, hay lời thoại nào. tts_script phải là chuỗi rỗng "".'
+        : '';
+    const musicNote = no_music
+        ? '\nÂM THANH: Không có nhạc nền. Chỉ giữ âm thanh tự nhiên từ cảnh quay (tiếng bước chân, tiếng nước, tiếng gió...) phù hợp với hành động trên màn hình.'
+        : '';
+
+    // Build system instruction từ JSON config
+    const systemInstruction = scriptConfig.system_instruction
+        .replace('{DURATION_LABEL}', durationLabel)
+        .replace('{SCENE_COUNT}', String(sceneCount))
+        .replace('{TARGET_LANG}', targetLang)
+        + voiceNote
+        + musicNote;
+
+    // Build user prompt từ JSON config
+    const tpl = scriptConfig.prompts[input_type] || scriptConfig.prompts.topic;
+    let userPrompt = tpl
+        .replace('{TARGET_LANG}', targetLang)
+        .replace('{COPY_RATIO}', String(copy_ratio))
+        .replace('{CREATIVE_RATIO}', String(100 - Number(copy_ratio)))
+        .replace('{DURATION_LABEL}', durationLabel)
+        .replace('{ADDITIONAL_DESC}', additional_description ? `Mô tả thêm: ${additional_description}\n` : '')
+        .replace('{NO_VOICE_FLAG}', no_voice ? 'KHÔNG CÓ THOẠI. Tất cả các cảnh hoàn toàn im lặng.' : '')
+        .replace('{NO_MUSIC_FLAG}', no_music ? 'Không có nhạc nền. Chỉ giữ âm thanh tự nhiên từ cảnh quay.' : '')
+        .replace('{TOPIC}', topic || '');
+
+    try {
+        const genaiModule = await importGenai();
+        if (!genaiModule) {
+            return res.status(500).json({ success: false, error: 'Chưa cài đặt @google/genai. Chạy: npm install @google/genai' });
+        }
+        const { GoogleGenAI, HarmCategory, HarmBlockThreshold, Type } = genaiModule;
+
+        const allKeys = getGeminiApiKeys();
+        if (allKeys.length === 0) {
+            return res.status(500).json({ success: false, error: 'GEMINI_API_KEY chưa được cài đặt. Vui lòng nhập API key ở panel bên trái hoặc set GEMINI_API_KEY trong .env' });
+        }
+
+        // Safety settings - block nothing
+        const safetySettings = [
+            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        ];
+
+        // Language
+        const langMap: Record<string, string> = {
+            vi: 'Vietnamese', en: 'English', fr: 'French', de: 'German', ru: 'Russian',
+            ja: 'Japanese', ko: 'Korean', zh: 'Chinese', hi: 'Hindi', it: 'Italian',
+            es: 'Spanish', pt: 'Portuguese',
+        };
+        const targetLang = langMap[language] || 'Vietnamese';
+
+        // Build user prompt content
+        const langHint = `TARGET LANGUAGE FOR TTS/AUDIO: ${targetLang}\n`;
+        userPrompt = langHint + userPrompt;
+
+        // Build model queue
+        const MODEL_ORDER = [
+            'gemini-2.5-flash',
+            'gemini-3.5-flash',
+            'gemini-3-flash-preview',
+            'gemini-3.1-flash-lite-preview',
+            'gemini-2.5-flash-lite',
+        ];
+        const userModel = getGeminiModel().replace('models/', '');
+        const modelQueue: string[] = [userModel, ...MODEL_ORDER.filter(m => m !== userModel)];
+
+        // Nested retry: model first → then key
+        let lastError = 'Chưa thử';
+        outerLoop:
+        for (const modelName of modelQueue) {
+            const modelId = modelName.startsWith('models/') ? modelName : `models/${modelName}`;
+            for (const apiKey of allKeys) {
+                const ai = new GoogleGenAI({ apiKey });
+                logger.info(`[Script Generate] Trying model=${modelId}, key=${apiKey.slice(0, 12)}...`);
+                try {
+                    const resp = await ai.models.generateContent({
+                        model: modelId,
+                        contents: [{ text: userPrompt }],
+                        config: {
+                            systemInstruction,
+                            temperature: Number(temperature),
+                            responseMimeType: 'application/json',
+                            safetySettings,
+                        },
+                    });
+                    const rawText = resp.text;
+                    if (!rawText?.trim()) { lastError = 'Gemini trả về response rỗng'; break; }
+                    logger.info(`[Script Generate] Raw response (${rawText.length} chars): ${rawText.slice(0, 500)}`);
+                    const data = parseLLMJsonOutput(rawText.trim());
+                    if (!data) { lastError = `Gemini không trả JSON đúng format. Raw: ${rawText.slice(0, 200)}`; break; }
+                    if (!data.scenes?.length) { lastError = `Gemini trả JSON thiếu scenes. Keys: ${Object.keys(data).join(', ')}`; break; }
+
+                    const result = {
+                        title: data.title || topic || 'Untitled Script',
+                        topic: data.topic || topic || '',
+                        total_scenes: data.total_scenes || data.scenes.length,
+                        scenes: data.scenes.map((s: any, i: number) => ({
+                            scene_id: s.scene_id ?? (i + 1),
+                            scene_title: s.scene_title || `Cảnh ${i + 1}`,
+                            description: s.description || '',
+                            visual_prompt: s.visual_prompt || s.image_prompt || '',
+                            tts_script: s.tts_script || '',
+                            transition: s.transition,
+                        })),
+                    };
+                    return res.json({ success: true, data: result });
+                } catch (callErr: any) {
+                    lastError = callErr.message || String(callErr);
+                    if (!isGeminiOverload(lastError)) {
+                        break outerLoop;
+                    }
+                    // Overload → thử model tiếp theo, KHÔNG retry cùng model/key
+                    logger.info(`[Script Generate] Overload: model=${modelName} key=${apiKey.slice(0, 12)} → skip to next model`);
+                    break;
+                }
+            }
+        }
+
+        if (isGeminiOverload(lastError)) {
+            return res.status(503).json({ success: false, error: 'Gemini đang quá tải, vui lòng thử lại sau vài phút.' });
+        }
+        return res.status(500).json({ success: false, error: lastError });
+    } catch (err: any) {
+        logger.error('[Script Generate] Error:', err);
+        res.status(500).json({ success: false, error: err.message || 'Lỗi khi sinh kịch bản' });
+    }
+});
+
+export default router;
+

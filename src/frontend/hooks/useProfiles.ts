@@ -255,6 +255,7 @@ export function useFlowImages() {
         modelKey?: string;
         aspectRatio?: string;
         userPaygateTier?: 'PAYGATE_TIER_ONE' | 'PAYGATE_TIER_TWO';
+        upscaleResolution?: string;
     }) => {
         setGenerating(true);
         setError(null);
@@ -266,6 +267,7 @@ export function useFlowImages() {
                 modelKey: data.modelKey,
                 aspectRatio: data.aspectRatio,
                 userPaygateTier: data.userPaygateTier,
+                upscaleResolution: data.upscaleResolution,
             });
             setLastResult(result);
             return result;

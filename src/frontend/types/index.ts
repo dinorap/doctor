@@ -170,6 +170,7 @@ export interface VideoGenerationRequest {
     negativePrompt?: string;
     seed?: number;
     guidanceScale?: number;
+    referenceAudio?: { mediaId: string }[];
 }
 
 export interface UploadImageRequest {

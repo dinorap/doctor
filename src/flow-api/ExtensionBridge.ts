@@ -504,6 +504,7 @@ export class ExtensionBridge extends EventEmitter {
         endImageMediaId?: string;
         userPaygateTier?: string;
         videoModelKey?: string;
+        referenceAudio?: { mediaId: string }[];
     }): Promise<any> {
         const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
         const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
@@ -529,6 +530,11 @@ export class ExtensionBridge extends EventEmitter {
         } else if (useStartEnd) {
             request.startImage = { mediaId: params.startImageMediaId };
             request.endImage = { mediaId: params.endImageMediaId };
+        }
+
+        // Thêm referenceAudio để đồng nhất giọng nhân vật
+        if (params.referenceAudio && params.referenceAudio.length > 0) {
+            request.referenceAudio = params.referenceAudio;
         }
 
         if (params.videoModelKey) {
@@ -590,6 +596,7 @@ export class ExtensionBridge extends EventEmitter {
         aspectRatio?: string;
         userPaygateTier?: string;
         videoModelKey?: string;
+        referenceAudio?: { mediaId: string }[];
     }): Promise<any> {
         const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
         const userPaygateTier = params.userPaygateTier || 'PAYGATE_TIER_TWO';
@@ -608,6 +615,11 @@ export class ExtensionBridge extends EventEmitter {
             })),
             metadata: {},
         };
+
+        // Add referenceAudio if provided
+        if (params.referenceAudio && params.referenceAudio.length > 0) {
+            request.referenceAudio = params.referenceAudio;
+        }
 
         if (params.videoModelKey) {
             request.videoModelKey = params.videoModelKey;

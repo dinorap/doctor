@@ -6,6 +6,7 @@ import LibraryModal from './LibraryModal';
 
 interface FlowVideosTabProps {
   profiles: Profile[];
+  projectName?: string; // when provided, only shows this project's profiles
   onOpenProfile?: (profileId: string) => Promise<void>;
   onWaitForProfileReady?: (profileId: string, timeoutMs?: number) => Promise<void>;
 }
@@ -36,6 +37,38 @@ interface VideoModel {
   supportsAspectRatio: boolean;
   supportsI2v: boolean;
 }
+
+const VOICES = [
+  "Achernar",
+  "Achird",
+  "Algenib",
+  "Algieba",
+  "Alnilam",
+  "Aoede",
+  "Autonoe",
+  "Callirrhoe",
+  "Charon",
+  "Despina",
+  "Enceladus",
+  "Erinome",
+  "Fenrir",
+  "Iapetus",
+  "Kore",
+  "Laomedeia",
+  "Leda",
+  "Orus",
+  "Puck",
+  "Pulcherrima",
+  "Rasalgethi",
+  "Sadachbia",
+  "Sadaltager",
+  "Schedar",
+  "Sulafat",
+  "Umbriel",
+  "Vindemiatrix",
+  "Zephyr",
+  "Zubenelgenubi",
+];
 
 const VIDEO_MODELS: VideoModel[] = [
   {
@@ -113,6 +146,7 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
   const [negativePrompt, setNegativePrompt] = useState('');
   const [seed, setSeed] = useState<string>('');
   const [guidanceScale, setGuidanceScale] = useState<string>('7.5');
+  const [selectedVoice, setSelectedVoice] = useState<string>('');
 
   // Images for text_reference (multiple allowed)
   const [referenceFiles, setReferenceFiles] = useState<File[]>([]);
@@ -163,7 +197,8 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
   // Filter models theo feature
   const getAvailableModels = () => {
     if (feature === 'start_end') {
-      return VIDEO_MODELS.filter(m => m.supportsI2v);
+      // start-to-end: loại bỏ omni_flash, chỉ giữ veo models
+      return VIDEO_MODELS.filter(m => m.id !== 'omni_flash' && m.supportsI2v);
     }
     return VIDEO_MODELS;
   };
@@ -324,68 +359,42 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
     setError(null);
 
     try {
-      const ids: string[] = [];
+      const uploadFile = async (file: File): Promise<string> => {
+        const fileData = await fileToBase64(file);
+        const res = await fetch('/api/flow/videos/upload-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            profileId: selectedProfile.id,
+            projectId: selectedProjectObj.projectId,
+            fileName: file.name,
+            fileData,
+          }),
+        });
+        const result = await res.json();
+        if (!result.success) throw new Error(result.error || 'Upload failed');
+        console.info('[Upload] mediaId:', result.data.mediaId, 'for file:', file.name);
+        return result.data.mediaId;
+      };
+
+      let ids: string[] = [];
 
       if (feature === 'start_end') {
-        // Upload start image
-        if (startImageFile) {
-          const fileData = await fileToBase64(startImageFile);
-          const res = await fetch('/api/flow/videos/upload-image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              profileId: selectedProfile.id,
-              projectId: selectedProjectObj.projectId,
-              fileName: startImageFile.name,
-              fileData,
-            }),
-          });
-          const result = await res.json();
-          if (!result.success) throw new Error(result.error || 'Upload failed');
-          console.info('[Upload] Start image mediaId:', result.data.mediaId);
-          ids[0] = result.data.mediaId;
-        }
-        // Upload end image
-        if (endImageFile) {
-          const fileData = await fileToBase64(endImageFile);
-          const res = await fetch('/api/flow/videos/upload-image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              profileId: selectedProfile.id,
-              projectId: selectedProjectObj.projectId,
-              fileName: endImageFile.name,
-              fileData,
-            }),
-          });
-          const result = await res.json();
-          if (!result.success) throw new Error(result.error || 'Upload failed');
-          console.info('[Upload] End image mediaId:', result.data.mediaId);
-          ids[1] = result.data.mediaId;
-        }
+        // Upload start and end images in PARALLEL
+        const uploads: Promise<string>[] = [];
+        if (startImageFile) uploads.push(uploadFile(startImageFile));
+        if (endImageFile) uploads.push(uploadFile(endImageFile));
+        
+        const results = await Promise.all(uploads);
+        ids = results;
       } else {
-        // Upload reference images
-        for (const file of referenceFiles) {
-          const fileData = await fileToBase64(file);
-          const res = await fetch('/api/flow/videos/upload-image', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              profileId: selectedProfile.id,
-              projectId: selectedProjectObj.projectId,
-              fileName: file.name,
-              fileData,
-            }),
-          });
-          const result = await res.json();
-          if (!result.success) throw new Error(result.error || 'Upload failed');
-          console.info('[Upload] Reference image mediaId:', result.data.mediaId);
-          ids.push(result.data.mediaId);
-        }
+        // Upload all reference images in PARALLEL
+        ids = await Promise.all(referenceFiles.map(file => uploadFile(file)));
       }
 
       const validIds = ids.filter(Boolean);
       setUploadedMediaIds(validIds);
+      console.info('[Upload] All done. mediaIds:', validIds);
       return validIds;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed');
@@ -460,6 +469,28 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
         fileMediaIds = await uploadImages();
       }
 
+      // Upload library images in PARALLEL to get valid Flow mediaIds
+      let libraryUploadedMediaIds: string[] = [];
+      if (libraryMediaIds.length > 0) {
+        setError('Uploading library images...');
+        const uploadPromises = libraryMediaIds.map(async (entityId) => {
+          try {
+            const uploadRes = await api.uploadLibraryEntityImage(
+              entityId,
+              selectedProfile.id,
+              selectedProjectObj.projectId
+            );
+            return uploadRes.newMediaId;
+          } catch (uploadError: any) {
+            console.error(`Failed to upload library image ${entityId}:`, uploadError);
+            throw new Error(`Failed to upload library image: ${uploadError.message}`);
+          }
+        });
+        libraryUploadedMediaIds = await Promise.all(uploadPromises);
+        console.info('[Upload] Library images uploaded. mediaIds:', libraryUploadedMediaIds);
+        setError(null);
+      }
+
       const sceneId = `scene-${Date.now()}`;
 
       // Determine API mode
@@ -492,6 +523,14 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
         guidanceScale: guidanceScale ? Number(guidanceScale) : undefined,
       };
 
+      if (selectedVoice) {
+        payload.referenceAudio = [
+          {
+            mediaId: selectedVoice.toLowerCase(),
+          },
+        ];
+      }
+
       // Add media IDs based on mode
       if (feature === 'start_end') {
         // Only use uploaded mediaIds if we just uploaded (feature + files selected)
@@ -501,9 +540,9 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
       } else if (referenceFiles.length > 0) {
         // Reference mode with files: use uploaded mediaIds
         payload.referenceMediaIds = fileMediaIds;
-      } else if (libraryMediaIds.length > 0) {
-        // Reference mode with library: use library mediaIds directly
-        payload.referenceMediaIds = libraryMediaIds;
+      } else if (libraryUploadedMediaIds.length > 0) {
+        // Reference mode with library: use uploaded mediaIds (not original library IDs)
+        payload.referenceMediaIds = libraryUploadedMediaIds;
       }
 
       const queueItem: QueueItem = {
@@ -693,8 +732,9 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           mediaIds: mediaIds,
         });
         
-        if (!status || !status.isComplete) {
-          console.warn('[Video Poll] API call failed or returned incomplete status:', status);
+        // Only stop polling on actual error, not when video is still processing
+        if (!status) {
+          console.warn('[Video Poll] API call failed:', status);
           window.clearInterval(timer);
           return;
         }
@@ -708,7 +748,9 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           media?: any[];
           hasActiveMedia?: boolean;
           hasSuccessfulMedia?: boolean;
+          hasFailedMedia?: boolean;
           shouldStopPolling?: boolean;
+          stopReason?: string | null;
           autoDownloadResult?: any;
         };
         const { 
@@ -717,13 +759,17 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           media = [], 
           hasActiveMedia = false, 
           hasSuccessfulMedia = false,
+          hasFailedMedia = false,
           shouldStopPolling = false,
+          stopReason,
           autoDownloadResult,
         } = statusData;
         console.info('[Video Poll] Status response:', {
           isComplete,
           hasSuccessfulMedia,
+          hasFailedMedia,
           hasActiveMedia,
+          stopReason,
           completedVideosCount: completedVideos?.length,
           completedVideosFirst: completedVideos?.[0],
           mediaIdsCount: mediaIds?.length,
@@ -754,11 +800,29 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
         console.info('[Video Poll] Decision check:', {
           isComplete,
           hasSuccessfulMedia,
+          hasFailedMedia,
           mediaIdFromStatus,
           completedVideosFirstMediaId: completedVideos?.[0]?.mediaId,
           mediaIdsFirst: mediaIds?.[0],
           mediaCount: media?.length,
         });
+
+        // Handle failed video
+        if (hasFailedMedia) {
+          console.warn('[Video Poll] Video FAILED!', stopReason);
+          window.clearInterval(timer);
+          
+          setQueue((prev) =>
+            prev.map((item) =>
+              item.requestId === lastResult!.sceneId
+                ? { ...item, status: 'failed', error: stopReason || 'Video generation failed' }
+                : item,
+            ),
+          );
+          
+          setError(`Video generation failed: ${stopReason || 'Unknown error'}`);
+          return;
+        }
 
         if (isComplete && mediaIdFromStatus) {
           console.info('[Video Poll] SUCCESSFUL! mediaId=', mediaIdFromStatus, 'isComplete=', isComplete, 'hasSuccessfulMedia=', hasSuccessfulMedia);
@@ -1230,11 +1294,13 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                 <div className="form-group">
                   <label className="form-label">
                     Reference Image {referenceFiles.length === 0 && <span className="optional-tag">Optional</span>}
+                    {referenceFiles.length > 0 && <span className="selected-count">{referenceFiles.length} selected</span>}
                   </label>
                   <div className="image-row">
                     <input
                       type="file"
                       accept="image/*"
+                      multiple
                       className="form-input"
                       onChange={(e) => handleReferenceFilesChange(e.target.files)}
                     />
@@ -1296,6 +1362,30 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                   onChange={(e) => setPrompt(e.target.value)}
                 />
               </div>
+
+              {/* Voice - hidden for start-to-end mode */}
+              {feature !== 'start_end' && (
+                <div className="form-group">
+                  <label className="form-label">Character Voice <span className="optional-tag">Optional</span></label>
+                  <select
+                    className="form-input"
+                    value={selectedVoice}
+                    onChange={(e) => setSelectedVoice(e.target.value)}
+                  >
+                    <option value="">No voice / default</option>
+                    {VOICES.map((voice) => (
+                      <option key={voice} value={voice}>{voice}</option>
+                    ))}
+                  </select>
+                  <div className="input-hint">
+                    {selectedVoice ? (
+                      <>Will send <strong>referenceAudio</strong> with mediaId <code>{selectedVoice.toLowerCase()}</code>.</>
+                    ) : (
+                      <>Leave empty to generate without a fixed character voice.</>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Advanced */}
               <details className="advanced-settings">
@@ -1528,7 +1618,11 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
         isOpen={showLibrary}
         onClose={() => setShowLibrary(false)}
         onSelect={handleSelectFromLibrary}
+        onSelectMultiple={(entities) => {
+          entities.forEach(entity => handleSelectFromLibrary(entity));
+        }}
         projectId={selectedProjectObj?.projectId}
+        multiSelect={libraryTarget === 'reference'}
       />
 
       <style>{`
@@ -1953,6 +2047,16 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           color: #a0a0b0;
           font-weight: normal;
           margin-left: 6px;
+        }
+
+        .selected-count {
+          font-size: 0.7rem;
+          color: #22c55e;
+          font-weight: normal;
+          margin-left: 6px;
+          background: rgba(34, 197, 94, 0.2);
+          padding: 2px 8px;
+          border-radius: 10px;
         }
 
         /* Form inputs */

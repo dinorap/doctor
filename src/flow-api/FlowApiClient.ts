@@ -252,6 +252,7 @@ export class FlowApiClient extends EventEmitter {
         endImageMediaId?: string;
         userPaygateTier?: PaygateTier;
         videoModelKey?: string;
+        referenceAudio?: { mediaId: string }[];
     }): Promise<any> {
         this.ensureFlowKey();
         const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
@@ -269,16 +270,21 @@ export class FlowApiClient extends EventEmitter {
                     parts: [{ text: params.prompt }],
                 },
             },
-            metadata: { sceneId: params.sceneId },
+            metadata: {},
         };
 
         // Chỉ thêm startImage/endImage khi có mediaId thực
+        // cropCoordinates mặc định cho start_end mode
+        const defaultCrop = { top: 0, left: 0.344, bottom: 1, right: 0.656 };
         if (useStartImage) {
-            request.startImage = { mediaId: params.startImageMediaId };
+            request.startImage = { mediaId: params.startImageMediaId, cropCoordinates: defaultCrop };
         } else if (useStartEnd) {
-            request.startImage = { mediaId: params.startImageMediaId };
-            request.endImage = { mediaId: params.endImageMediaId };
+            request.startImage = { mediaId: params.startImageMediaId, cropCoordinates: defaultCrop };
+            request.endImage = { mediaId: params.endImageMediaId, cropCoordinates: defaultCrop };
         }
+
+        // NOTE: referenceAudio NOT supported for batchAsyncGenerateVideoStartAndEndImage
+        // Only supported for reference video generation
 
         if (params.videoModelKey) {
             request.videoModelKey = params.videoModelKey;
@@ -308,6 +314,7 @@ export class FlowApiClient extends EventEmitter {
         aspectRatio?: string;
         userPaygateTier?: PaygateTier;
         videoModelKey?: string;
+        referenceAudio?: { mediaId: string }[];
     }): Promise<any> {
         this.ensureFlowKey();
         const aspectRatio = params.aspectRatio || 'VIDEO_ASPECT_RATIO_PORTRAIT';
@@ -327,6 +334,11 @@ export class FlowApiClient extends EventEmitter {
             })),
             metadata: {},
         };
+
+        // Add referenceAudio if provided
+        if (params.referenceAudio && params.referenceAudio.length > 0) {
+            request.referenceAudio = params.referenceAudio;
+        }
 
         if (params.videoModelKey) {
             request.videoModelKey = params.videoModelKey;

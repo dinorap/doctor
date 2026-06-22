@@ -173,6 +173,119 @@ body {
     border-radius: 8px;
 }
 
+/* Project Detail Header */
+.project-detail-header {
+    background: rgba(24, 24, 27, 0.8);
+    backdrop-filter: blur(12px);
+    padding: 20px 32px 16px 32px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 50;
+}
+
+.project-detail-header-top {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.project-detail-title {
+    flex: 1;
+}
+
+.project-detail-title h2 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0;
+}
+
+.project-detail-title h2 span {
+    font-size: 1.1rem;
+}
+
+.project-detail-desc {
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    margin: 4px 0 0 0;
+}
+
+.project-detail-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.project-detail-profiles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.project-profile-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.project-profile-chip .status-dot {
+    font-size: 0.5rem;
+    color: var(--text-muted);
+}
+
+.project-profile-chip .status-dot.active {
+    color: var(--success);
+}
+
+.project-id-chip {
+    color: var(--text-muted);
+    font-family: monospace;
+    font-size: 0.7rem;
+}
+
+/* Content Tabs (Videos / Images) */
+.content-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 0 24px 16px 24px;
+    border-bottom: 1px solid var(--border);
+}
+
+.content-tab {
+    padding: 10px 20px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+}
+
+.content-tab:hover {
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+
+.content-tab.active {
+    background: var(--accent-gradient);
+    color: white;
+    font-weight: 600;
+    box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+/* Sidebar Sections (collapsible) */
+
 /* Footer */
 .sidebar-footer {
     padding: 20px 24px;

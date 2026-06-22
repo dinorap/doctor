@@ -15,8 +15,10 @@ interface LibraryModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (entity: LibraryEntity) => void;
+  onSelectMultiple?: (entities: LibraryEntity[]) => void;
   projectId?: string;
   apiBase?: string;
+  multiSelect?: boolean;
 }
 
 const ENTITY_TYPE_LABELS: Record<string, { name: string; icon: string }> = {
@@ -33,8 +35,10 @@ export default function LibraryModal({
   isOpen,
   onClose,
   onSelect,
+  onSelectMultiple,
   projectId,
   apiBase = '/api',
+  multiSelect = false,
 }: LibraryModalProps) {
   const [activeTab, setActiveTab] = useState<string>('all');
   const [entities, setEntities] = useState<LibraryEntity[]>([]);
@@ -42,6 +46,7 @@ export default function LibraryModal({
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState('');
   const [selectedEntity, setSelectedEntity] = useState<LibraryEntity | null>(null);
+  const [selectedEntities, setSelectedEntities] = useState<LibraryEntity[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const fetchEntities = useCallback(async () => {
@@ -85,6 +90,14 @@ export default function LibraryModal({
     }
   }, [isOpen, fetchEntities]);
 
+  // Reset selection when modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      setSelectedEntity(null);
+      setSelectedEntities([]);
+    }
+  }, [isOpen]);
+
   // Filter by tab and search
   useEffect(() => {
     let filtered = allEntities;
@@ -106,9 +119,34 @@ export default function LibraryModal({
     setEntities(filtered);
   }, [activeTab, search, allEntities]);
 
+  // Handle single select
   const handleSelect = () => {
     if (selectedEntity) {
       onSelect(selectedEntity);
+      onClose();
+    }
+  };
+
+  // Handle multi-select: toggle entity in selection
+  const toggleEntitySelection = (entity: LibraryEntity) => {
+    if (multiSelect) {
+      setSelectedEntities(prev => {
+        const exists = prev.find(e => e.id === entity.id);
+        if (exists) {
+          return prev.filter(e => e.id !== entity.id);
+        } else {
+          return [...prev, entity];
+        }
+      });
+    } else {
+      setSelectedEntity(entity);
+    }
+  };
+
+  // Handle multi-select confirm
+  const handleSelectMultiple = () => {
+    if (selectedEntities.length > 0 && onSelectMultiple) {
+      onSelectMultiple(selectedEntities);
       onClose();
     }
   };
@@ -181,61 +219,109 @@ export default function LibraryModal({
             </div>
           ) : (
             <div className="library-grid">
-              {entities.map(entity => (
-                <div
-                  key={entity.id}
-                  className={`library-card ${selectedEntity?.id === entity.id ? 'selected' : ''}`}
-                  onClick={() => setSelectedEntity(entity)}
-                >
-                  <div className="library-card-image">
-                    {entity.reference_image_url ? (
-                      <img
-                        src={entity.reference_image_url}
-                        alt={entity.name}
-                        loading="lazy"
-                      />
-                    ) : (
-                      <div className="library-card-placeholder">
-                        {ENTITY_TYPE_LABELS[entity.entity_type]?.icon || '🖼️'}
+              {entities.map(entity => {
+                const isSelected = multiSelect
+                  ? selectedEntities.some(e => e.id === entity.id)
+                  : selectedEntity?.id === entity.id;
+                return (
+                  <div
+                    key={entity.id}
+                    className={`library-card ${isSelected ? 'selected' : ''}`}
+                    onClick={() => toggleEntitySelection(entity)}
+                  >
+                    {multiSelect && (
+                      <div className={`library-card-checkbox ${isSelected ? 'checked' : ''}`}>
+                        {isSelected && '✓'}
                       </div>
                     )}
-                    {entity.media_id && (
-                      <span className="library-card-badge">✓</span>
-                    )}
+                    <div className="library-card-image">
+                      {entity.reference_image_url ? (
+                        <img
+                          src={entity.reference_image_url}
+                          alt={entity.name}
+                          loading="lazy"
+                        />
+                      ) : (
+                        <div className="library-card-placeholder">
+                          {ENTITY_TYPE_LABELS[entity.entity_type]?.icon || '🖼️'}
+                        </div>
+                      )}
+                      {entity.media_id && (
+                        <span className="library-card-badge">✓</span>
+                      )}
+                    </div>
+                    <div className="library-card-info">
+                      <span className="library-card-name">{entity.name}</span>
+                      <span className="library-card-type">
+                        {ENTITY_TYPE_LABELS[entity.entity_type]?.icon}
+                      </span>
+                    </div>
                   </div>
-                  <div className="library-card-info">
-                    <span className="library-card-name">{entity.name}</span>
-                    <span className="library-card-type">
-                      {ENTITY_TYPE_LABELS[entity.entity_type]?.icon}
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
 
         {/* Footer */}
-        {selectedEntity && (
-          <div className="library-footer">
-            <div className="library-selected-preview">
-              {selectedEntity.reference_image_url && (
-                <img src={selectedEntity.reference_image_url} alt="" />
-              )}
-              <div className="library-selected-info">
-                <strong>{selectedEntity.name}</strong>
-                <span>{ENTITY_TYPE_LABELS[selectedEntity.entity_type]?.name}</span>
+        {multiSelect ? (
+          // Multi-select footer
+          selectedEntities.length > 0 && (
+            <div className="library-footer">
+              <div className="library-selected-preview library-multi-preview">
+                <div className="library-multi-count">
+                  {selectedEntities.length} image(s) selected
+                </div>
+                <div className="library-multi-list">
+                  {selectedEntities.slice(0, 5).map(entity => (
+                    <div key={entity.id} className="library-multi-thumb">
+                      {entity.reference_image_url ? (
+                        <img src={entity.reference_image_url} alt={entity.name} />
+                      ) : (
+                        <div className="library-multi-placeholder">
+                          {ENTITY_TYPE_LABELS[entity.entity_type]?.icon || '🖼️'}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {selectedEntities.length > 5 && (
+                    <div className="library-multi-more">+{selectedEntities.length - 5}</div>
+                  )}
+                </div>
+              </div>
+              <div className="library-actions">
+                <button className="btn btn-secondary" onClick={onClose}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" onClick={handleSelectMultiple}>
+                  Add {selectedEntities.length} Image{selectedEntities.length > 1 ? 's' : ''}
+                </button>
               </div>
             </div>
-            <div className="library-actions">
-              <button className="btn btn-secondary" onClick={onClose}>
-                Cancel
-              </button>
-              <button className="btn btn-primary" onClick={handleSelect}>
-                Use as Reference
-              </button>
+          )
+        ) : (
+          // Single-select footer
+          selectedEntity && (
+            <div className="library-footer">
+              <div className="library-selected-preview">
+                {selectedEntity.reference_image_url && (
+                  <img src={selectedEntity.reference_image_url} alt="" />
+                )}
+                <div className="library-selected-info">
+                  <strong>{selectedEntity.name}</strong>
+                  <span>{ENTITY_TYPE_LABELS[selectedEntity.entity_type]?.name}</span>
+                </div>
+              </div>
+              <div className="library-actions">
+                <button className="btn btn-secondary" onClick={onClose}>
+                  Cancel
+                </button>
+                <button className="btn btn-primary" onClick={handleSelect}>
+                  Use as Reference
+                </button>
+              </div>
             </div>
-          </div>
+          )
         )}
       </div>
 
@@ -471,6 +557,30 @@ export default function LibraryModal({
           background: rgba(99, 102, 241, 0.1);
         }
 
+        .library-card-checkbox {
+          position: absolute;
+          top: 8px;
+          left: 8px;
+          width: 24px;
+          height: 24px;
+          border-radius: 6px;
+          background: rgba(0, 0, 0, 0.6);
+          border: 2px solid rgba(255, 255, 255, 0.3);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 14px;
+          font-weight: bold;
+          color: white;
+          z-index: 1;
+          transition: all 0.2s;
+        }
+
+        .library-card-checkbox.checked {
+          background: #6366f1;
+          border-color: #6366f1;
+        }
+
         .library-card-image {
           aspect-ratio: 1;
           background: rgba(0, 0, 0, 0.3);
@@ -565,6 +675,61 @@ export default function LibraryModal({
         .library-selected-info span {
           font-size: 0.8rem;
           color: var(--text-secondary, #888);
+        }
+
+        .library-multi-preview {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 8px;
+        }
+
+        .library-multi-count {
+          font-size: 0.9rem;
+          font-weight: 500;
+          color: #818cf8;
+        }
+
+        .library-multi-list {
+          display: flex;
+          gap: 6px;
+          flex-wrap: wrap;
+        }
+
+        .library-multi-thumb {
+          width: 36px;
+          height: 36px;
+          border-radius: 6px;
+          overflow: hidden;
+          background: rgba(0, 0, 0, 0.3);
+        }
+
+        .library-multi-thumb img {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+        }
+
+        .library-multi-placeholder {
+          width: 100%;
+          height: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 1rem;
+          opacity: 0.5;
+        }
+
+        .library-multi-more {
+          width: 36px;
+          height: 36px;
+          border-radius: 6px;
+          background: rgba(99, 102, 241, 0.3);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 0.8rem;
+          font-weight: 600;
+          color: #818cf8;
         }
 
         .library-actions {

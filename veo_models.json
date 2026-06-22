@@ -87,44 +87,38 @@
       },
       "I2V": {
         "FAST": {
-          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_fast_landscape_ultra",
-          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_fast_portrait_ultra",
+          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_fast_ultra_fl",
+          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_fast_portrait_ultra_fl",
           "VIDEO_DURATION_4S": {
-            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_fast_landscape_ultra_4s",
-            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_fast_portrait_ultra_4s"
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_fast_6s_fl",
+            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_fast_6s_fl"
           },
           "VIDEO_DURATION_6S": {
-            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_fast_landscape_ultra_6s",
-            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_fast_portrait_ultra_6s"
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_fast_4s_fl",
+            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_fast_4s_fl"
           }
         },
         "QUALITY": {
-          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v",
-          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_portrait",
+          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_fl",
+          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_portrait_fl",
           "VIDEO_DURATION_4S": {
-            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_4s",
-            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_portrait_4s"
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_quality_6s_fl",
+            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_quality_6s_fl"
           },
           "VIDEO_DURATION_6S": {
-            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_6s",
-            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_portrait_6s"
+            "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_quality_6s_fl",
+            "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_quality_6s_fl"
           }
         },
         "LITE": {
-          "VIDEO_DURATION_8S": "veo_3_1_i2v_lite",
-          "VIDEO_DURATION_4S": "veo_3_1_i2v_lite_4s",
-          "VIDEO_DURATION_6S": "veo_3_1_i2v_lite_6s"
+          "VIDEO_DURATION_8S": "veo_3_1_interpolation_lite",
+          "VIDEO_DURATION_4S": "veo_3_1_i2v_s_lite_4s_fl",
+          "VIDEO_DURATION_6S": "veo_3_1_i2v_s_lite_6s_fl"
         },
         "LITE_LOW_PRIORITY": {
-          "VIDEO_DURATION_8S": "veo_3_1_i2v_lite_low_priority",
-          "VIDEO_DURATION_4S": "veo_3_1_i2v_lite_4s_low_priority",
-          "VIDEO_DURATION_6S": "veo_3_1_i2v_lite_6s_low_priority"
-        },
-        "OMNI_FLASH": {
-          "VIDEO_DURATION_4S": "abra_i2v_4s",
-          "VIDEO_DURATION_6S": "abra_i2v_6s",
-          "VIDEO_DURATION_8S": "abra_i2v_8s",
-          "VIDEO_DURATION_10S": "abra_i2v_10s"
+          "VIDEO_DURATION_8S": "veo_3_1_interpolation_lite_low_priority",
+          "VIDEO_DURATION_4S": "veo_3_1_i2v_s_lite_4s_fl_low_priority",
+          "VIDEO_DURATION_6S": "veo_3_1_i2v_s_lite_6s_fl_low_priority"
         }
       }
     },
@@ -169,21 +163,15 @@
       },
       "I2V": {
         "FAST": {
-          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_fast_landscape",
-          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_fast_portrait"
+          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_fast_fl",
+          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_fast_portrait_fl"
         },
         "QUALITY": {
-          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v",
-          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_portrait"
+          "VIDEO_ASPECT_RATIO_LANDSCAPE": "veo_3_1_i2v_s_fl",
+          "VIDEO_ASPECT_RATIO_PORTRAIT": "veo_3_1_i2v_s_portrait_fl"
         },
         "LITE": {
-          "VIDEO_DURATION_8S": "veo_3_1_i2v_lite"
-        },
-        "OMNI_FLASH": {
-          "VIDEO_DURATION_4S": "abra_i2v_4s",
-          "VIDEO_DURATION_6S": "abra_i2v_6s",
-          "VIDEO_DURATION_8S": "abra_i2v_8s",
-          "VIDEO_DURATION_10S": "abra_i2v_10s"
+          "VIDEO_DURATION_8S": "veo_3_1_interpolation_lite"
         }
       }
     }
