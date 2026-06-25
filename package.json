@@ -9,6 +9,8 @@
         "dev:backend": "tsx watch src/main.ts",
         "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
         "dev:all": "concurrently -n backend,frontend -c blue,green \"npm run dev:backend\" \"npm run dev:frontend\"",
+        "test": "vitest run",
+        "test:watch": "vitest",
         "build": "tsc && npm run build:frontend",
         "start": "npm run build && node dist/main.js",
         "clean": "rimraf dist",
@@ -27,8 +29,6 @@
         "@google/genai": "^2.9.0",
         "@google/generative-ai": "^0.24.1",
         "@types/better-sqlite3": "^7.6.13",
-        "@types/react": "^19.2.17",
-        "@types/react-dom": "^19.2.3",
         "better-sqlite3": "^12.11.1",
         "cloakbrowser": "^0.3.31",
         "cors": "^2.8.5",
@@ -41,9 +41,13 @@
         "ws": "^8.21.0"
     },
     "devDependencies": {
+        "@testing-library/jest-dom": "^6.9.1",
+        "@testing-library/react": "^16.3.2",
         "@types/cors": "^2.8.17",
         "@types/express": "^4.17.21",
         "@types/node": "^20.10.0",
+        "@types/react": "^19.2.17",
+        "@types/react-dom": "^19.2.3",
         "@types/uuid": "^9.0.7",
         "@types/ws": "^8.18.1",
         "@typescript-eslint/eslint-plugin": "^6.13.0",
@@ -51,11 +55,13 @@
         "@vitejs/plugin-react": "^6.0.2",
         "concurrently": "^10.0.3",
         "eslint": "^8.54.0",
+        "jsdom": "^27.0.1",
         "prettier": "^3.1.0",
         "rimraf": "^5.0.5",
         "tsx": "^4.7.0",
         "typescript": "^5.3.2",
-        "vite": "^8.0.16"
+        "vite": "^8.0.16",
+        "vitest": "^3.2.6"
     },
     "engines": {
         "node": ">=18.0.0"

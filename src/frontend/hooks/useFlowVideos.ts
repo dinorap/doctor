@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react';
 import { api } from '../services/api';
 import type {
   VideoGenerationRequest,
+  VideoGenerationMode,
   UploadImageRequest,
   UploadImageResult,
   VideoStatusResponse,
@@ -88,12 +89,14 @@ export function useFlowVideos() {
             userPaygateTier: data.userPaygateTier || 'PAYGATE_TIER_TWO',
             operations: result.operations || [],
             requestIds: result.requestIds || [],
-            mediaId: result.mediaId || null,
-            servingUri: result.servingUri || null,
-            downloadUrl: result.downloadUrl || null,
-            localPath: result.localPath || null,
+            mediaIds: result.mediaIds || [],
+            workflows: result.workflows || [],
+            mediaId: result.mediaId || undefined,
+            servingUri: result.servingUri || undefined,
+            downloadUrl: result.downloadUrl || undefined,
+            localPath: result.localPath || undefined,
             rawResult: result.rawResult || result,
-          },
+          } as GeneratedVideoResult,
         });
         return result;
       } catch (error) {
@@ -116,14 +119,16 @@ export function useFlowVideos() {
             profileId: data.profileId,
             projectId: data.projectId,
             sceneId: data.sceneId,
-            mode: 'image_to_video',
+            mode: 'start_image' as VideoGenerationMode, // Upscale uses start_image mode
             aspectRatio: (data.aspectRatio as any) || 'VIDEO_ASPECT_RATIO_PORTRAIT',
-            userPaygateTier: 'PAYGATE_TIER_TWO',
-            operations: result.operations || [],
-            requestIds: result.requestIds || [],
+            userPaygateTier: 'PAYGATE_TIER_TWO' as const,
+            operations: [],
+            requestIds: [],
+            mediaIds: [],
+            workflows: [],
             mediaId: data.mediaId,
-            rawResult: result.rawResult || result,
-          },
+            rawResult: result,
+          } as GeneratedVideoResult,
         });
         return result;
       } catch (error) {
@@ -143,8 +148,16 @@ export function useFlowVideos() {
         setBusy({
           polling: false,
           videoStatus: {
-            operations: result.operations || [],
-            requestIds: result.requestIds || [],
+            success: true,
+            data: {
+              profileId,
+              operations: result.operations || [],
+              mediaIds: result.mediaIds || [],
+              status: result.status,
+              media: result.media || [],
+              completedVideos: result.completedVideos || [],
+              isComplete: result.isComplete || false,
+            },
           },
         });
         return result;

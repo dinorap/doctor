@@ -19,6 +19,24 @@ export interface ExtensionStatus {
     updatedAt: number;
 }
 
+const BRIDGE_MAX_RETRIES = 2;
+const BRIDGE_RETRY_DELAY_MS = 2000;
+
+// Helper to check if error is retryable
+function isRetryableBridgeError(error: string): boolean {
+    const err = error.toLowerCase();
+    return err.includes('403') ||
+           err.includes('captcha') ||
+           err.includes('blocked') ||
+           err.includes('verify') ||
+           err.includes('rate limit') ||
+           err.includes('429') ||
+           err.includes('timeout') ||
+           err.includes('econnreset') ||
+           err.includes('network') ||
+           err.includes('temporary failure');
+}
+
 /**
  * Per-profile extension bridge. Holds the websocket, pending requests and
  * cached status for ONE Chromium profile. Never shared across profiles.
@@ -424,10 +442,11 @@ export class ExtensionBridge extends EventEmitter {
 
         // Extract media ID from response
         // Response: { media: { name: "uuid" } }
-        if (response && !response.error) {
-            const media = response.media || (response.data && response.data.media);
+        const responseObj = response as any;
+        if (responseObj && !responseObj.error) {
+            const media = responseObj.media || (responseObj.data && responseObj.data.media);
             if (media?.name) {
-                response._mediaId = media.name;
+                responseObj._mediaId = media.name;
             }
         }
 
@@ -478,21 +497,40 @@ export class ExtensionBridge extends EventEmitter {
             requests,
         };
 
-        const response: any = await this.sendRequest('api_request', {
-            url: `https://aisandbox-pa.googleapis.com/v1/projects/${params.projectId}/flowMedia:batchGenerateImages`,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body,
-            captchaAction: 'IMAGE_GENERATION',
-        });
+        // Retry wrapper for this request
+        let lastError: string = '';
+        for (let attempt = 0; attempt <= BRIDGE_MAX_RETRIES; attempt++) {
+            try {
+                const response: any = await this.sendRequest('api_request', {
+                    url: `https://aisandbox-pa.googleapis.com/v1/projects/${params.projectId}/flowMedia:batchGenerateImages`,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body,
+                    captchaAction: 'IMAGE_GENERATION',
+                });
 
-        if (response?.error) {
-            throw new Error(response.error);
+                if (response?.error) {
+                    throw new Error(response.error);
+                }
+
+                return response?.data ?? response;
+            } catch (err) {
+                lastError = err instanceof Error ? err.message : String(err);
+                const isRetryable = isRetryableBridgeError(lastError);
+                
+                if (isRetryable && attempt < BRIDGE_MAX_RETRIES) {
+                    logger.warn(`[Bridge generateImages] Attempt ${attempt + 1} failed: ${lastError}. Retrying...`);
+                    await new Promise(resolve => setTimeout(resolve, BRIDGE_RETRY_DELAY_MS));
+                    continue;
+                }
+                
+                throw err;
+            }
         }
-
-        return response?.data ?? response;
+        
+        throw new Error(lastError || 'Max retries exceeded');
     }
 
     public async generateVideo(params: {
@@ -571,21 +609,40 @@ export class ExtensionBridge extends EventEmitter {
             url = 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoText';
         }
 
-        const response: any = await this.sendRequest('api_request', {
-            url,
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body,
-            captchaAction: 'VIDEO_GENERATION',
-        });
+        // Retry wrapper for this request
+        let lastError: string = '';
+        for (let attempt = 0; attempt <= BRIDGE_MAX_RETRIES; attempt++) {
+            try {
+                const response: any = await this.sendRequest('api_request', {
+                    url,
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body,
+                    captchaAction: 'VIDEO_GENERATION',
+                });
 
-        if (response?.error) {
-            throw new Error(response.error);
+                if (response?.error) {
+                    throw new Error(response.error);
+                }
+
+                return response?.data ?? response;
+            } catch (err) {
+                lastError = err instanceof Error ? err.message : String(err);
+                const isRetryable = isRetryableBridgeError(lastError);
+                
+                if (isRetryable && attempt < BRIDGE_MAX_RETRIES) {
+                    logger.warn(`[Bridge generateVideo] Attempt ${attempt + 1} failed: ${lastError}. Retrying in ${BRIDGE_RETRY_DELAY_MS}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, BRIDGE_RETRY_DELAY_MS));
+                    continue;
+                }
+                
+                throw err;
+            }
         }
-
-        return response?.data ?? response;
+        
+        throw new Error(lastError || 'Max retries exceeded');
     }
 
     public async generateVideoFromReferences(params: {
@@ -644,21 +701,40 @@ export class ExtensionBridge extends EventEmitter {
             useV2ModelConfig: true,
         };
 
-        const response: any = await this.sendRequest('api_request', {
-            url: 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body,
-            captchaAction: 'VIDEO_GENERATION',
-        });
+        // Retry wrapper for this request
+        let lastError: string = '';
+        for (let attempt = 0; attempt <= BRIDGE_MAX_RETRIES; attempt++) {
+            try {
+                const response: any = await this.sendRequest('api_request', {
+                    url: 'https://aisandbox-pa.googleapis.com/v1/video:batchAsyncGenerateVideoReferenceImages',
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body,
+                    captchaAction: 'VIDEO_GENERATION',
+                });
 
-        if (response?.error) {
-            throw new Error(response.error);
+                if (response?.error) {
+                    throw new Error(response.error);
+                }
+
+                return response?.data ?? response;
+            } catch (err) {
+                lastError = err instanceof Error ? err.message : String(err);
+                const isRetryable = isRetryableBridgeError(lastError);
+                
+                if (isRetryable && attempt < BRIDGE_MAX_RETRIES) {
+                    logger.warn(`[Bridge generateVideoFromReferences] Attempt ${attempt + 1} failed: ${lastError}. Retrying...`);
+                    await new Promise(resolve => setTimeout(resolve, BRIDGE_RETRY_DELAY_MS));
+                    continue;
+                }
+                
+                throw err;
+            }
         }
-
-        return response?.data ?? response;
+        
+        throw new Error(lastError || 'Max retries exceeded');
     }
 
     /**
@@ -807,7 +883,8 @@ export class ExtensionBridge extends EventEmitter {
                     })),
                 },
             });
-            logger.info(`[checkVideoStatus] mediaIds=${mediaIds.length} responseStatus=${response?.status || response?.data?.status || 'unknown'}`);
+            const responseObj = response as any;
+            logger.info(`[checkVideoStatus] mediaIds=${mediaIds.length} responseStatus=${responseObj?.status || responseObj?.data?.status || 'unknown'}`);
             return response;
         }
         
@@ -825,8 +902,9 @@ export class ExtensionBridge extends EventEmitter {
                     })),
                 },
             });
-            logger.info(`[checkVideoStatus] operations=${operations.length} responseStatus=${response?.status || response?.data?.status || 'unknown'}`);
-            return response;
+            const responseObj2 = response as any;
+            logger.info(`[checkVideoStatus] operations=${operations.length} responseStatus=${responseObj2?.status || responseObj2?.data?.status || 'unknown'}`);
+            return responseObj2;
         }
         
         return { media: [], operations: [] };

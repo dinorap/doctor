@@ -3,6 +3,7 @@ import type { Profile, FlowProject, GeneratedVideoResult, LibraryEntity, Complet
 import type { VideoAspectRatio, VideoDuration, VideoUpscaleResolution, SelectedVideoResolution } from '../types';
 import { api } from '../services/api';
 import LibraryModal from './LibraryModal';
+import StatusProgressBar, { StatusType } from './StatusProgressBar';
 
 interface FlowVideosTabProps {
   profiles: Profile[];
@@ -19,13 +20,32 @@ interface QueueItem {
   profileId: string;
   projectId: string;
   sceneId: string;
-  status: OperationStatus;
+  status: StatusType;
   progress: number;
+  retryCount: number;
+  maxRetries: number;
   error?: string;
   result?: GeneratedVideoResult;
   createdAt: string;
   updatedAt: string;
 }
+
+// Helper to check if error is retryable
+const isRetryableError = (error: string): boolean => {
+  const err = error.toLowerCase();
+  return err.includes('403') || 
+         err.includes('captcha') || 
+         err.includes('blocked') || 
+         err.includes('verify') ||
+         err.includes('human') ||
+         err.includes('rate limit') ||
+         err.includes('429') ||
+         err.includes('timeout') ||
+         err.includes('network') ||
+         err.includes('econnreset') ||
+         err.includes('html') ||
+         err.includes('<!doctype');
+};
 
 // 5 Video Models
 interface VideoModel {
@@ -163,12 +183,40 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
   const [startMediaId, setStartMediaId] = useState<string | null>(null);
   const [endMediaId, setEndMediaId] = useState<string | null>(null);
 
-  // State
-  const [queue, setQueue] = useState<QueueItem[]>([]);
+  // State - persisted to localStorage
+  const [queue, setQueue] = useState<QueueItem[]>(() => {
+    try {
+      const stored = localStorage.getItem('flowVideos_queue');
+      return stored ? JSON.parse(stored) : [];
+    } catch { return []; }
+  });
   const [generating, setGenerating] = useState(false);
-  const [lastResult, setLastResult] = useState<GeneratedVideoResult | null>(null);
+  const [lastResult, setLastResult] = useState<GeneratedVideoResult | null>(() => {
+    try {
+      const stored = localStorage.getItem('flowVideos_lastResult');
+      return stored ? JSON.parse(stored) : null;
+    } catch { return null; }
+  });
   const lastResultRef = useRef<GeneratedVideoResult | null>(null);
   useEffect(() => { lastResultRef.current = lastResult; }, [lastResult]);
+  
+  // Persist queue to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('flowVideos_queue', JSON.stringify(queue));
+    } catch {}
+  }, [queue]);
+  
+  // Persist lastResult to localStorage
+  useEffect(() => {
+    try {
+      if (lastResult) {
+        localStorage.setItem('flowVideos_lastResult', JSON.stringify(lastResult));
+      } else {
+        localStorage.removeItem('flowVideos_lastResult');
+      }
+    } catch {}
+  }, [lastResult]);
   
   // Track download completion to stop polling
   const downloadCompleteRef = useRef(false);
@@ -185,10 +233,10 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
     sourceMediaId: string | null;
     requestIds: string[];
     mediaIds: string[];
-    status: 'idle' | 'generating' | 'polling' | 'downloading' | 'done' | 'error';
+    status: StatusType;
     finalVideoUrl: string | null;
     error: string | null;
-  }>({ active: false, resolution: 'original', sourceMediaId: null, requestIds: [], mediaIds: [], status: 'idle', finalVideoUrl: null, error: null });
+  }>({ active: false, resolution: 'original', sourceMediaId: null, requestIds: [], mediaIds: [], status: 'pending', finalVideoUrl: null, error: null });
   const upscalePollTimerRef = useRef<number | null>(null);
 
   // MARKER: identifies this build as the "stop-on-complete" version
@@ -549,57 +597,132 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
         requestId: sceneId,
         profileId: selectedProfile.id,
         projectId: selectedProjectObj.projectId,
-        sceneId,
+        sceneId: sceneId,
         status: 'processing',
         progress: 0,
+        retryCount: 0,
+        maxRetries: 2,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
       setQueue((prev) => [queueItem, ...prev]);
 
-      const result = await api.generateFlowVideo(payload);
+      try {
+        const result = await api.generateFlowVideo(payload);
 
-      // Extract mediaIds and workflows from response
-      const mediaIds = result.mediaIds || [];
-      const workflows = result.workflows || [];
-      const requestIds = result.requestIds || [];
+        // Extract mediaIds and workflows from response
+        const mediaIds = result.mediaIds || [];
+        const workflows = result.workflows || [];
+        const requestIds = result.requestIds || [];
 
-      const generated: GeneratedVideoResult = {
-        profileId: selectedProfile.id,
-        projectId: selectedProjectObj.projectId,
-        sceneId,
-        mode: apiMode as any,
-        aspectRatio,
-        duration,
-        userPaygateTier: tier,
-        operations: result.operations || [],
-        requestIds,
-        mediaIds,
-        workflows,
-        rawResult: result,
-      };
-      setLastResult(generated);
-      
-      // Set queue item to processing (waiting for video to complete)
-      setQueue((prev) =>
-        prev.map((item) =>
-          item.requestId === sceneId
-            ? { ...item, status: 'processing', progress: 0 }
-            : item,
-        ),
-      );
-      
-      console.info(`[Video Generate] Queued - mediaIds: ${mediaIds.length}, workflows: ${workflows.length}`);
+        const generated: GeneratedVideoResult = {
+          profileId: selectedProfile.id,
+          projectId: selectedProjectObj.projectId,
+          sceneId,
+          mode: apiMode as any,
+          aspectRatio,
+          duration,
+          userPaygateTier: tier,
+          operations: result.operations || [],
+          requestIds,
+          mediaIds,
+          workflows,
+          rawResult: result,
+        };
+        setLastResult(generated);
+        
+        // Set queue item to processing (waiting for video to complete)
+        setQueue((prev) =>
+          prev.map((item) =>
+            item.requestId === sceneId
+              ? { ...item, status: 'processing', progress: 0 }
+              : item,
+          ),
+        );
+        
+        console.info(`[Video Generate] Queued - mediaIds: ${mediaIds.length}, workflows: ${workflows.length}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Generate failed';
+        const isRetryable = isRetryableError(message);
+        
+        // Get current queue item to check retry count
+        const currentQueueItem = queue.find(q => q.sceneId === sceneId);
+        const retryCount = currentQueueItem?.retryCount || 0;
+        const maxRetries = 2;
+        
+        if (isRetryable && retryCount < maxRetries) {
+          // Retryable error - retry after 2 seconds
+          console.warn(`[Video Generate] Retryable error (${retryCount + 1}/${maxRetries}): ${message}`);
+          setQueue((prev) =>
+            prev.map((item) =>
+              item.sceneId === sceneId
+                ? { ...item, status: 'processing', retryCount: retryCount + 1, error: `Retry ${retryCount + 1}/${maxRetries}: ${message}` }
+                : item,
+            ),
+          );
+          
+          setTimeout(async () => {
+            try {
+              const retryResult = await api.generateFlowVideo(payload);
+              // Success on retry - process normally
+              const mediaIds = retryResult.mediaIds || [];
+              const workflows = retryResult.workflows || [];
+              const requestIds = retryResult.requestIds || [];
+
+              const generated: GeneratedVideoResult = {
+                profileId: selectedProfile.id,
+                projectId: selectedProjectObj.projectId,
+                sceneId,
+                mode: apiMode as any,
+                aspectRatio,
+                duration,
+                userPaygateTier: tier,
+                operations: retryResult.operations || [],
+                requestIds,
+                mediaIds,
+                workflows,
+                rawResult: retryResult,
+              };
+              setLastResult(generated);
+              setQueue((prev) =>
+                prev.map((item) =>
+                  item.sceneId === sceneId
+                    ? { ...item, status: 'processing', progress: 0, error: undefined }
+                    : item,
+                ),
+              );
+            } catch (retryErr) {
+              const retryMessage = retryErr instanceof Error ? retryErr.message : 'Retry failed';
+              setQueue((prev) =>
+                prev.map((item) =>
+                  item.sceneId === sceneId
+                    ? { ...item, status: 'failed', error: `Retry failed: ${retryMessage}` }
+                    : item,
+                ),
+              );
+              setError(`Video generation failed after ${retryCount + 1} attempts: ${retryMessage}`);
+            }
+          }, 2000);
+          
+          return;
+        }
+        
+        // Non-retryable error or max retries exceeded
+        console.error(`[Video Generate] Failed: ${message}`);
+        setError(message);
+        setQueue((prev) =>
+          prev.map((item) =>
+            item.sceneId === sceneId
+              ? { ...item, status: 'failed', error: message, updatedAt: new Date().toISOString() }
+              : item,
+          ),
+        );
+      }
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Generate failed';
+      // Handle upload/preparation errors
+      const message = err instanceof Error ? err.message : 'Preparation failed';
+      console.error(`[Video Generate] Preparation error: ${message}`);
       setError(message);
-      setQueue((prev) =>
-        prev.map((item) =>
-          item.status === 'processing'
-            ? { ...item, status: 'failed', error: message, updatedAt: new Date().toISOString() }
-            : item,
-        ),
-      );
     } finally {
       setGenerating(false);
     }
@@ -812,15 +935,86 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
           console.warn('[Video Poll] Video FAILED!', stopReason);
           window.clearInterval(timer);
           
+          const currentQueueItem = queue.find(q => q.requestId === lastResult!.sceneId);
+          const retryCount = currentQueueItem?.retryCount || 0;
+          const maxRetries = 2;
+          const errorMsg = stopReason || 'Video generation failed';
+          
+          // Check if error is retryable
+          if (isRetryableError(errorMsg) && retryCount < maxRetries) {
+            // Retryable error - retry the generate API
+            console.warn(`[Video Poll] Retryable error (${retryCount + 1}/${maxRetries}): ${errorMsg}`);
+            setQueue((prev) =>
+              prev.map((item) =>
+                item.requestId === lastResult!.sceneId
+                  ? { ...item, status: 'processing', retryCount: retryCount + 1, progress: 0, error: `Retry ${retryCount + 1}/${maxRetries}: ${errorMsg}` }
+                  : item,
+              ),
+            );
+            
+            // Retry after 3 seconds
+            setTimeout(async () => {
+              try {
+                // Build payload from lastResult instead of the inaccessible 'payload' variable
+                const retryPayload: any = {
+                  profileId: lastResult!.profileId,
+                  projectId: lastResult!.projectId,
+                  sceneId: `${lastResult!.sceneId}-retry-${Date.now()}`,
+                  prompt: lastResult!.rawResult?.prompt || prompt,
+                  mode: lastResult!.mode,
+                  model: lastResult!.rawResult?.model,
+                  aspectRatio: lastResult!.aspectRatio,
+                  userPaygateTier: lastResult!.userPaygateTier,
+                  duration: lastResult!.duration,
+                };
+                const retryResult = await api.generateFlowVideo(retryPayload);
+                
+                // Update lastResult with new mediaIds
+                setLastResult(prev => prev ? {
+                  ...prev,
+                  sceneId: retryPayload.sceneId,
+                  requestIds: retryResult.requestIds || [],
+                  mediaIds: retryResult.mediaIds || [],
+                  operations: retryResult.operations || [],
+                } : prev);
+                
+                // Reset queue item
+                setQueue((prev) =>
+                  prev.map((item) =>
+                    item.requestId === lastResult!.sceneId
+                      ? { ...item, status: 'processing', progress: 0, error: undefined }
+                      : item,
+                  ),
+                );
+                
+                // Don't restart polling - the useEffect will pick up the new requestIds/mediaIds
+              } catch (retryErr) {
+                const retryMessage = retryErr instanceof Error ? retryErr.message : 'Retry failed';
+                console.error(`[Video Poll] Retry failed: ${retryMessage}`);
+                setQueue((prev) =>
+                  prev.map((item) =>
+                    item.requestId === lastResult!.sceneId
+                      ? { ...item, status: 'failed', error: `Failed after ${retryCount + 1} attempts: ${retryMessage}` }
+                      : item,
+                  ),
+                );
+                setError(`Video generation failed after ${retryCount + 1} attempts: ${retryMessage}`);
+              }
+            }, 3000);
+            
+            return;
+          }
+          
+          // Non-retryable error or max retries exceeded
           setQueue((prev) =>
             prev.map((item) =>
               item.requestId === lastResult!.sceneId
-                ? { ...item, status: 'failed', error: stopReason || 'Video generation failed' }
+                ? { ...item, status: 'failed', error: errorMsg }
                 : item,
             ),
           );
           
-          setError(`Video generation failed: ${stopReason || 'Unknown error'}`);
+          setError(`Video generation failed: ${errorMsg}`);
           return;
         }
 
@@ -909,8 +1103,10 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
               });
               if (currentResolution !== 'original' && upscaleMediaId && !upscaleState.active) {
                 console.info('[Video Poll] Triggering auto-upscale to', currentResolution, 'for mediaId:', upscaleMediaId);
-                // Call handleUpscale directly (it's async but we don't need to await)
-                handleUpscale(currentResolution, upscaleMediaId);
+                // Call handleUpscale with error handling
+                handleUpscale(currentResolution, upscaleMediaId).catch(err => {
+                  console.error('[Video Poll] Auto-upscale failed:', err);
+                });
               }
               
               // Stop polling
@@ -1533,19 +1729,24 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                 )}
 
                 {/* Upscale Progress */}
-                {upscaleState.active && upscaleState.status === 'polling' && (
-                  <div className="upscale-progress">
-                    <div className="loading-spinner" />
-                    <span>✨ Upscaling to {upscaleState.resolution === 'VIDEO_RESOLUTION_1080P' ? '1080p' : '4K'}...</span>
-                    <span className="upscale-hint">This may take a few minutes</span>
-                  </div>
-                )}
-
-                {/* Upscale Downloading */}
-                {upscaleState.active && upscaleState.status === 'downloading' && (
-                  <div className="upscale-progress">
-                    <div className="loading-spinner" />
-                    <span>✨ Downloading upscaled video...</span>
+                {upscaleState.active && (
+                  <div style={{ marginTop: '12px' }}>
+                    <StatusProgressBar
+                      status={upscaleState.status as StatusType}
+                      progress={upscaleState.status === 'polling' ? 50 :
+                               upscaleState.status === 'downloading' ? 75 :
+                               upscaleState.status === 'done' ? 100 : 0}
+                      label={
+                        upscaleState.status === 'polling' ? `Upscaling to ${upscaleState.resolution === 'VIDEO_RESOLUTION_1080P' ? '1080p' : '4K'}...` :
+                        upscaleState.status === 'downloading' ? 'Downloading upscaled video...' :
+                        upscaleState.status === 'done' ? 'Upscale complete!' :
+                        upscaleState.status === 'error' ? 'Upscale failed' :
+                        upscaleState.status === 'uploading' ? 'Uploading...' :
+                        upscaleState.status === 'processing' ? 'Processing...' :
+                        'Preparing...'
+                      }
+                      size="medium"
+                    />
                   </div>
                 )}
 
@@ -1568,7 +1769,7 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                 {upscaleState.status === 'done' && (
                   <button
                     className="btn btn-secondary"
-                    onClick={() => setUpscaleState({ active: false, resolution: 'original', sourceMediaId: null, requestIds: [], mediaIds: [], status: 'idle', finalVideoUrl: null, error: null })}
+                    onClick={() => setUpscaleState({ active: false, resolution: 'original', sourceMediaId: null, requestIds: [], mediaIds: [], status: 'pending', finalVideoUrl: null, error: null })}
                     style={{ marginTop: '8px' }}
                   >
                     🔄 New Video
@@ -1597,12 +1798,19 @@ function FlowVideosTab({ profiles, onOpenProfile, onWaitForProfileReady }: FlowV
                   <div key={item.requestId} className={`queue-item ${item.status}`}>
                     <div className="queue-item-header">
                       <span className="queue-status">
-                        {item.status === 'completed' ? '✅' :
-                          item.status === 'failed' ? '❌' :
-                            item.status === 'processing' ? '⏳' : '⏸️'}
+                        {item.status === 'completed' || item.status === 'done' ? '✅' :
+                          item.status === 'failed' || item.status === 'error' ? '❌' :
+                            item.status === 'processing' || item.status === 'polling' || item.status === 'downloading' ? '⏳' : '⏸️'}
                       </span>
                       <span className="queue-scene">{item.sceneId.slice(0, 12)}...</span>
                     </div>
+                    <StatusProgressBar
+                      status={item.status as StatusType}
+                      progress={item.progress}
+                      size="small"
+                      retryCount={item.retryCount}
+                      maxRetries={item.maxRetries}
+                    />
                     {item.error && (
                       <div className="queue-error">{item.error}</div>
                     )}

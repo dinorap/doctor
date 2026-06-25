@@ -67,7 +67,7 @@ export default function LibraryModal({
       // Flatten all entities from grouped response
       const flatEntities: LibraryEntity[] = [];
       if (data.grouped) {
-        Object.values(data.grouped).forEach((arr: any[]) => {
+        Object.values(data.grouped as Record<string, LibraryEntity[]>).forEach((arr) => {
           flatEntities.push(...arr);
         });
       } else {
@@ -248,6 +248,12 @@ export default function LibraryModal({
                       )}
                       {entity.media_id && (
                         <span className="library-card-badge">✓</span>
+                      )}
+                      {entity.image_prompt && (
+                        <div className="library-card-prompt-tooltip">
+                          <div className="prompt-tooltip-header">Prompt:</div>
+                          <div className="prompt-tooltip-content">{entity.image_prompt}</div>
+                        </div>
                       )}
                     </div>
                     <div className="library-card-info">
@@ -616,6 +622,38 @@ export default function LibraryModal({
           font-size: 0.7rem;
           color: white;
           font-weight: bold;
+        }
+
+        .library-card-prompt-tooltip {
+          position: absolute;
+          bottom: 0;
+          left: 0;
+          right: 0;
+          background: rgba(0, 0, 0, 0.9);
+          padding: 8px;
+          font-size: 0.7rem;
+          color: #fff;
+          opacity: 0;
+          transition: opacity 0.2s;
+          max-height: 80px;
+          overflow-y: auto;
+          border-top: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .library-card:hover .library-card-prompt-tooltip {
+          opacity: 1;
+        }
+
+        .prompt-tooltip-header {
+          color: #818cf8;
+          font-weight: 600;
+          margin-bottom: 4px;
+        }
+
+        .prompt-tooltip-content {
+          color: #ccc;
+          line-height: 1.4;
+          word-break: break-word;
         }
 
         .library-card-info {

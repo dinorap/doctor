@@ -15,12 +15,9 @@ export function useWebSocket() {
     const connect = useCallback(() => {
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-        // In dev mode (Vite), connect directly to backend WebSocket to avoid proxy issues
+        // In dev mode, connect directly to backend WebSocket to avoid proxy issues
         // In production, use relative path
-        const isDev = import.meta.env.DEV;
-        const wsUrl = isDev
-            ? 'ws://localhost:3000'
-            : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+        const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
 
         const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
@@ -85,6 +82,10 @@ export function useWebSocket() {
         ws.onclose = () => {
             console.log('WebSocket disconnected, reconnecting in 3s...');
             setConnected(false);
+            // Clear any existing reconnect timeout first
+            if (reconnectTimeoutRef.current) {
+                clearTimeout(reconnectTimeoutRef.current);
+            }
             reconnectTimeoutRef.current = setTimeout(connect, 3000);
         };
 

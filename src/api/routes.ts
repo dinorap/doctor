@@ -1,4 +1,4 @@
-﻿import express, { Request, Response } from 'express';
+import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -11,6 +11,52 @@ import { BrowserManager } from '../browser-manager/BrowserManager';
 import { ExtensionBridgeRegistry } from '../flow-api/ExtensionBridgeRegistry';
 import { FlowApiRegistry } from '../flow-api/FlowApiRegistry';
 import imageModels from '../../veo_models.json';
+
+const API_MAX_RETRIES = 2;
+const API_RETRY_DELAY_MS = 2000;
+
+// Helper to check if error is retryable
+function isRetryableApiError(error: string): boolean {
+    const err = error.toLowerCase();
+    return err.includes('403') ||
+           err.includes('captcha') ||
+           err.includes('blocked') ||
+           err.includes('verify') ||
+           err.includes('rate limit') ||
+           err.includes('429') ||
+           err.includes('timeout') ||
+           err.includes('econnreset') ||
+           err.includes('network') ||
+           err.includes('temporary failure');
+}
+
+// Generic API retry wrapper
+async function withRetry<T>(
+    operation: () => Promise<T>,
+    context: string
+): Promise<{ result: T; attempts: number }> {
+    let lastError: string = '';
+    
+    for (let attempt = 0; attempt <= API_MAX_RETRIES; attempt++) {
+        try {
+            const result = await operation();
+            return { result, attempts: attempt + 1 };
+        } catch (err) {
+            lastError = err instanceof Error ? err.message : String(err);
+            
+            if (isRetryableApiError(lastError) && attempt < API_MAX_RETRIES) {
+                logger.warn(`[API Retry] ${context} - attempt ${attempt + 1} failed: ${lastError}. Retrying in ${API_RETRY_DELAY_MS}ms...`);
+                await new Promise(resolve => setTimeout(resolve, API_RETRY_DELAY_MS));
+                continue;
+            }
+            
+            // Non-retryable or max retries exceeded
+            throw err;
+        }
+    }
+    
+    throw new Error(lastError || 'Max retries exceeded');
+}
 
 /**
  * Resolve frontend model label to actual model key
@@ -686,6 +732,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
             try {
                 result = await bridge.generateImages({
                     projectId: targetProjectId,
+                    sceneId: `image-${Date.now()}`,
                     prompt: prompt.trim(),
                     aspectRatio: resolvedAspectRatio,
                     userPaygateTier: resolvedTier,
@@ -875,7 +922,7 @@ router.post('/flow/images/generate', async (req: Request, res: Response) => {
                 localPath,
                 rawResult: result,
             },
-            message: usedBridge ? 'Tạo ảnh thành công' : 'Tạo ảnh thành công qua Flow API',
+            message: usedBridge ? 'T?o ?nh th�nh c�ng' : 'T?o ?nh th�nh c�ng qua Flow API',
         });
     } catch (error: any) {
         logger.error('Error generating Flow image:', error);
@@ -1754,6 +1801,41 @@ const MATERIAL_STYLES = {
     'retro_vhs': { name: 'Retro VHS' },
 };
 
+function resolveMaterialStyle(materialId?: string, req?: Request): { prefix: string; instruction: string; negative_prompt: string } | null {
+    const id = (materialId || '').trim();
+    if (!id) return null;
+
+    const fromRegistry = req ? (req.app.locals.materialRegistry as any | undefined) : undefined;
+    const entry = fromRegistry?.get?.(id) || fromRegistry?.[id];
+    if (entry?.style_instruction) {
+        return {
+            prefix: entry.scene_prefix || entry.style_instruction,
+            instruction: entry.style_instruction,
+            negative_prompt: entry.negative_prompt || '',
+        };
+    }
+
+    const promptMap: Record<string, string> = {
+        '3d_pixar': '3D animated style, Pixar-quality rendering, Disney-Pixar aesthetic. Smooth subsurface scattering skin, expressive cartoon eyes, stylized proportions, vibrant saturated colors.',
+        'realistic': 'Photorealistic RAW photograph, shot on Canon EOS R5, 35mm lens, natural available light, real footage.',
+        'anime': 'Japanese anime style, cel-shaded rendering, vibrant saturated colors, clean sharp linework, large expressive eyes, stylized anatomy. High-quality anime production, studio Ghibli meets modern anime aesthetic.',
+        'ghibli': 'Studio Ghibli anime style, hand-painted watercolor backgrounds, soft pastel colors, gentle rounded character designs, whimsical atmosphere. Hayao Miyazaki aesthetic, detailed natural environments, magical realism.',
+        'comic_book': 'American comic book art style, bold black ink outlines, flat vibrant colors with halftone dot shading, dynamic action poses, dramatic foreshortening. Marvel/DC superhero comic aesthetic, Ben-Day dots.',
+        'cyberpunk': 'Cyberpunk sci-fi aesthetic, neon-lit dark urban environment, holographic displays, rain-slicked streets reflecting neon signs. Blade Runner meets Ghost in the Shell, high-tech low-life, chrome and glass, purple and cyan color palette.',
+        'stop_motion': 'Stop-motion animation style with handcrafted felt and wood puppets. Visible felt fabric texture, wooden joints and dowels, miniature handmade set pieces, warm craft workshop lighting. Laika Studios / Wes Anderson stop-motion aesthetic.',
+        'minecraft': 'Minecraft voxel art style, blocky cubic geometry, pixel textures, 16x16 texture resolution aesthetic, square heads and bodies. Everything made of cubes and rectangular prisms. Minecraft game screenshot aesthetic.',
+        'oil_painting': 'Classical oil painting on canvas, visible thick brushstrokes, rich impasto texture, warm color palette, chiaroscuro lighting. Renaissance masters meets impressionist technique. Museum-quality fine art painting.',
+        'watercolor': 'Soft watercolor painting on cold-press paper, loose wet brushwork, translucent color washes bleeding into each other, white paper showing through. Delicate ink outlines, impressionistic and dreamy.',
+        'claymation': 'Clay animation style, characters made of modeling clay with visible fingerprint textures, slightly imperfect sculpted features. Wallace & Gromit / Aardman aesthetic, miniature handmade sets, warm practical lighting on tiny clay world.',
+        'lego': 'LEGO brick style, characters are LEGO minifigures with yellow skin and claw hands, environments built entirely from LEGO bricks and plates. Visible brick studs, ABS plastic texture, The LEGO Movie aesthetic.',
+        'retro_vhs': '1980s VHS tape aesthetic, analog video noise and scan lines, slightly washed-out warm colors, CRT TV curvature, tracking artifacts. Retro camcorder footage feel, date stamp overlay, nostalgic grain.',
+    };
+
+    const prompt = promptMap[id];
+    if (!prompt) return null;
+    return { prefix: prompt, instruction: prompt, negative_prompt: '' };
+}
+
 const ENTITY_ASPECT_RATIOS: Record<string, string> = {
     'location': 'IMAGE_ASPECT_RATIO_LANDSCAPE',
     'character': 'IMAGE_ASPECT_RATIO_PORTRAIT',
@@ -1857,7 +1939,7 @@ router.post('/library/entities/:id/upload', async (req: Request, res: Response) 
 
         // Try to get entity from DB
         const entity = db.getEntityReference(entityId);
-        
+
         // Determine filePath - check multiple possible locations
         let filePath: string | undefined;
         let originalMediaId = '';
@@ -1891,14 +1973,16 @@ router.post('/library/entities/:id/upload', async (req: Request, res: Response) 
                             const found = searchForFile(fullPath);
                             if (found) return found;
                         } else if (entry.isFile() && (
-                            entry.name === `${entityId}.jpg` || 
-                            entry.name === `${entityId}.png` || 
+                            entry.name === `${entityId}.jpg` ||
+                            entry.name === `${entityId}.png` ||
                             entry.name === `${entityId}.jpeg`
                         )) {
                             return fullPath;
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    logger.debug(`[Routes] Error searching directory: ${e}`);
+                }
                 return null;
             };
             filePath = searchForFile(entitiesBaseDir) || undefined;
@@ -1917,6 +2001,13 @@ router.post('/library/entities/:id/upload', async (req: Request, res: Response) 
 
         logger.info(`[Library Upload] Uploading entity ${entityId} from ${filePath}`);
 
+        // Read file and convert to base64 for FlowApiClient
+        let fileBase64 = '';
+        if (filePath) {
+            const fileBuffer = fs.readFileSync(filePath);
+            fileBase64 = fileBuffer.toString('base64');
+        }
+
         // Use the existing upload endpoint logic directly
         const extensionRegistry = req.app.locals.extensionRegistry as ExtensionBridgeRegistry | undefined;
         const flowRegistry = (req.app.locals as any).flowRegistry as FlowApiRegistry | undefined;
@@ -1933,13 +2024,14 @@ router.post('/library/entities/:id/upload', async (req: Request, res: Response) 
                 projectId,
                 sceneId: uploadSceneId,
             });
-        } else if (flowClient) {
-            uploadResult = await flowClient.uploadImage({
-                filePath,
-                fileName,
+        } else if (flowClient && flowClient.hasFlowKey()) {
+            // FlowApiClient.uploadImage takes (imageBase64, mimeType, projectId, fileName)
+            uploadResult = await flowClient.uploadImage(
+                fileBase64,
+                'image/jpeg',
                 projectId,
-                sceneId: uploadSceneId,
-            });
+                fileName
+            );
         }
 
         // Extract mediaId - result has data.media.name or _mediaId
@@ -2131,6 +2223,379 @@ router.get('/library/entity-types', (_req: Request, res: Response) => {
 });
 
 /**
+ * GET /scripts - List all scripts for a profile
+ */
+router.get('/scripts', (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const profileId = req.query.profileId as string | undefined;
+        const projectId = req.query.projectId as string | undefined;
+
+        let scripts: any[];
+        if (projectId) {
+            scripts = db.getScriptReferencesByProject(projectId);
+        } else if (profileId) {
+            scripts = db.getScriptReferencesByProfile(profileId);
+        } else {
+            return res.status(400).json({ success: false, error: 'profileId or projectId is required' });
+        }
+
+        res.json({
+            success: true,
+            data: scripts.map(s => ({
+                ...s,
+                content: undefined, // Don't send full content in list
+            })),
+        });
+    } catch (error: any) {
+        logger.error('Error listing scripts:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * GET /scripts/:id - Get a single script with full content
+ */
+router.get('/scripts/:id', (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const script = db.getScriptReference(req.params.id);
+
+        if (!script) {
+            return res.status(404).json({ success: false, error: 'Script not found' });
+        }
+
+        let content = null;
+        try {
+            content = JSON.parse(script.content);
+        } catch {
+            content = null;
+        }
+
+        res.json({
+            success: true,
+            data: {
+                ...script,
+                content,
+            },
+        });
+    } catch (error: any) {
+        logger.error('Error getting script:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * DELETE /scripts/:id - Delete a script
+ */
+router.delete('/scripts/:id', (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const deleted = db.deleteScriptReference(req.params.id);
+
+        if (!deleted) {
+            return res.status(404).json({ success: false, error: 'Script not found' });
+        }
+
+        res.json({ success: true });
+    } catch (error: any) {
+        logger.error('Error deleting script:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * POST /scripts/update-scenes - Update specific fields in script scenes
+ *
+ * This allows partial updates to scenes without replacing the entire script.
+ * Only the provided fields will be updated; all other scene data is preserved.
+ * Body: { scriptId, scenes: [{ scene_id, description?, tts_script?, visual_prompt?, image_prompt?, duration_seconds?, transition?, suggested_visual? }] }
+ */
+router.post('/scripts/update-scenes', (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const { scriptId, scenes: updatedScenes } = req.body || {};
+
+        if (!scriptId) {
+            return res.status(400).json({ success: false, error: 'scriptId is required' });
+        }
+
+        if (!updatedScenes || !Array.isArray(updatedScenes)) {
+            return res.status(400).json({ success: false, error: 'scenes array is required' });
+        }
+
+        // Get the script
+        const script = db.getScriptReference(scriptId);
+        if (!script) {
+            return res.status(404).json({ success: false, error: 'Script not found' });
+        }
+
+        // Parse content
+        let content: any;
+        try {
+            content = typeof script.content === 'string' ? JSON.parse(script.content) : script.content;
+        } catch {
+            return res.status(500).json({ success: false, error: 'Invalid script content' });
+        }
+
+        if (!content.scenes || !Array.isArray(content.scenes)) {
+            return res.status(400).json({ success: false, error: 'Script has no scenes array' });
+        }
+
+        // Build scene lookup by scene_id
+        const sceneMap = new Map<number, any>();
+        content.scenes.forEach((scene: any) => {
+            sceneMap.set(scene.scene_id, scene);
+        });
+
+        // Apply updates
+        const allowedFields = [
+            'scene_title',
+            'description',
+            'tts_script',
+            'visual_prompt',
+            'image_prompt',
+            'duration_seconds',
+            'transition',
+            'suggested_visual',
+            'characters',
+        ];
+
+        const updatedSceneIds: number[] = [];
+
+        updatedScenes.forEach((update: any) => {
+            const sceneId = update.scene_id;
+            if (sceneId === undefined || sceneId === null) return;
+
+            const scene = sceneMap.get(sceneId);
+            if (!scene) return;
+
+            // Only allow updating specific fields
+            allowedFields.forEach(field => {
+                if (update[field] !== undefined) {
+                    scene[field] = update[field];
+                }
+            });
+
+            updatedSceneIds.push(sceneId);
+        });
+
+        if (updatedSceneIds.length === 0) {
+            return res.status(400).json({ success: false, error: 'No valid scenes to update' });
+        }
+
+        // Save updated script
+        db.updateScriptReference(scriptId, {
+            content: JSON.stringify(content),
+        });
+
+        res.json({
+            success: true,
+            data: {
+                id: scriptId,
+                updatedSceneIds,
+                content,
+            },
+        });
+    } catch (error: any) {
+        logger.error('Error updating script scenes:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * POST /scripts/update-characters - Update script with character descriptions injected into scene prompts
+ * 
+ * This takes a script and injects character descriptions into the scene prompts.
+ * Example: "con m�o tr�o c�y" -> "con m�o (m�o den, m?t to) dang tr�o c�y"
+ */
+router.post('/scripts/update-characters', (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const { scriptId, characters } = req.body || {};
+
+        if (!scriptId) {
+            return res.status(400).json({ success: false, error: 'scriptId is required' });
+        }
+
+        if (!characters || !Array.isArray(characters)) {
+            return res.status(400).json({ success: false, error: 'characters array is required' });
+        }
+
+        // Get the script
+        const script = db.getScriptReference(scriptId);
+        if (!script) {
+            return res.status(404).json({ success: false, error: 'Script not found' });
+        }
+
+        // Parse content
+        let content: any;
+        try {
+            content = typeof script.content === 'string' ? JSON.parse(script.content) : script.content;
+        } catch (parseError) {
+            return res.status(500).json({ success: false, error: 'Invalid script content' });
+        }
+
+        // Build character lookup map (name -> description)
+        const charDescriptions: Record<string, string> = {};
+        characters.forEach((char: any) => {
+            if (char.description) {
+                charDescriptions[char.name] = char.description;
+            }
+        });
+
+        // Update scenes: inject character descriptions into prompts
+        if (content.scenes && Array.isArray(content.scenes)) {
+            content.scenes.forEach((scene: any) => {
+                // Update description
+                if (scene.description) {
+                    scene.description = injectCharacterDescriptions(scene.description, scene.characters || [], charDescriptions);
+                }
+                // Update visual_prompt / image_prompt
+                if (scene.visual_prompt) {
+                    scene.visual_prompt = injectCharacterDescriptions(scene.visual_prompt, scene.characters || [], charDescriptions);
+                }
+                if (scene.image_prompt) {
+                    scene.image_prompt = injectCharacterDescriptions(scene.image_prompt, scene.characters || [], charDescriptions);
+                }
+                // Update tts_script
+                if (scene.tts_script) {
+                    scene.tts_script = injectCharacterDescriptions(scene.tts_script, scene.characters || [], charDescriptions);
+                }
+            });
+        }
+
+        // Update global characters array if exists
+        if (content.characters && Array.isArray(content.characters)) {
+            content.characters = content.characters.map((char: any) => {
+                const desc = charDescriptions[char.name];
+                if (desc) {
+                    return { ...char, description: desc };
+                }
+                return char;
+            });
+        }
+
+        // Save updated script
+        db.updateScriptReference(scriptId, {
+            content: JSON.stringify(content),
+            metadata: JSON.stringify({
+                ...JSON.parse(script.metadata || '{}'),
+                updatedWithCharacters: new Date().toISOString(),
+                characterDescriptions: charDescriptions
+            })
+        });
+
+        res.json({
+            success: true,
+            data: {
+                id: scriptId,
+                content,
+                updatedCharacters: charDescriptions
+            }
+        });
+    } catch (error: any) {
+        logger.error('Error updating script with characters:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
+ * Helper function to inject character descriptions into text
+ * Example: "con m�o tr�o c�y" with characters ["m�o"] and descriptions {"m�o": "m�o den, m?t to"}
+ * Result: "con m�o (m�o den, m?t to) tr�o c�y"
+ * Note: Only injects after the FIRST occurrence of each character name
+ */
+function injectCharacterDescriptions(text: string, sceneCharacters: string[], charDescriptions: Record<string, string>): string {
+    if (!text || !sceneCharacters || sceneCharacters.length === 0) {
+        return text;
+    }
+
+    let result = text;
+
+    // Process each character in the scene
+    sceneCharacters.forEach(charName => {
+        const description = charDescriptions[charName];
+        if (!description) return;
+
+        // Only replace FIRST occurrence - use 'i' flag but NOT 'g'
+        const escapedName = charName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const pattern = new RegExp(`(${escapedName})\\s*(\\([^)]*\\))?`, 'i');
+
+        result = result.replace(pattern, (match, name, existingParens) => {
+            if (existingParens) {
+                // Already has description, update it
+                return `${name} (${description})`;
+            }
+            // Add description after first occurrence only
+            return `${name} (${description})`;
+        });
+    });
+
+    return result;
+}
+
+/**
+ * POST /scripts - Create a new script
+ */
+router.post('/scripts', (req: Request, res: Response) => {
+    try {
+        const db = req.app.locals.db as DatabaseManager;
+        const { projectId, profileId, content, metadata } = req.body || {};
+
+        if (!projectId) {
+            return res.status(400).json({ success: false, error: 'projectId is required' });
+        }
+
+        if (!content) {
+            return res.status(400).json({ success: false, error: 'content is required' });
+        }
+
+        const id = `script_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+        const parsedContent = typeof content === 'object' ? content : JSON.parse(content as string);
+
+        // Extract metadata fields
+        const name = parsedContent?.title || metadata?.topic || metadata?.youtubeUrl || 'Untitled Script';
+        const inputType = metadata?.inputType || metadata?.input_type || null;
+        const topic = metadata?.topic || null;
+        const storytellingMode = metadata?.storytellingMode || metadata?.storytelling_mode || 'auto';
+        const durationText = metadata?.duration ? `${metadata.duration} ph�t` : '1 ph�t';
+        const copyRatio = metadata?.copyRatio || metadata?.copy_ratio || 50;
+
+        const scriptRecord = db.createScriptReference({
+            id,
+            projectId,
+            profileId: profileId || null,
+            name,
+            version: 1,
+            input_type: inputType,
+            topic,
+            storytelling_mode: storytellingMode,
+            duration_text: durationText,
+            copy_ratio: copyRatio,
+            material_id: null,
+            content: typeof parsedContent === 'object' ? JSON.stringify(parsedContent) : parsedContent,
+            metadata: typeof metadata === 'object' ? JSON.stringify(metadata) : metadata,
+        });
+
+        res.json({
+            success: true,
+            data: {
+                id: scriptRecord.id,
+                projectId: scriptRecord.projectId,
+                profileId: scriptRecord.profileId,
+                content: parsedContent,
+                metadata,
+                createdAt: scriptRecord.createdAt,
+            },
+        });
+    } catch (error: any) {
+        logger.error('Error creating script:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+/**
  * POST /entities/generate - Generate a new entity reference image
  */
 router.post('/entities/generate', async (req: Request, res: Response) => {
@@ -2171,7 +2636,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
         }
 
         // Validate material
-        if (!MATERIAL_STYLES[materialId]) {
+        if (!(MATERIAL_STYLES as any)[materialId]) {
             return res.status(400).json({
                 success: false,
                 error: `Invalid materialId. Must be one of: ${Object.keys(MATERIAL_STYLES).join(', ')}`,
@@ -2241,7 +2706,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
 
         // Try extension bridge first, then FlowApiClient
         const bridge = extensionRegistry?.get(profileId);
-        const flowClient = flowRegistry?.getOrCreate(profileId);
+        const flowClient = flowRegistry?.getOrCreate(profileId)!; // Non-null assertion since we check hasFlowKey() below
 
         let result: any = null;
         let usedBridge = false;
@@ -2250,6 +2715,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             try {
                 result = await bridge.generateImages({
                     projectId: targetProjectId,
+                    sceneId: `entity-${Date.now()}`,
                     prompt,
                     aspectRatio,
                     userPaygateTier: tier,
@@ -2373,7 +2839,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
                         // Direct base64 response
                         const upscaleSuffix = upscaleResolution === 'UPSAMPLE_IMAGE_RESOLUTION_4K' ? '_4k' : '_2k';
                         finalMediaId = mediaId + upscaleSuffix;
-                        
+
                         // Save base64 as image file
                         try {
                             if (!fs.existsSync(entitiesDir)) {
@@ -2451,6 +2917,7 @@ router.post('/entities/generate', async (req: Request, res: Response) => {
             id: entityId,
             name: name.trim(),
             description: description || '',
+            imagePrompt: prompt.trim(), // Save the original prompt for future reference
             entityType,
             materialId,
             mediaId: finalMediaId || '',
@@ -2768,7 +3235,7 @@ router.post('/flow/videos/upload-image', async (req: Request, res: Response) => 
 
         // Handle file upload - either from path or base64 data
         let resolvedFilePath = filePath;
-        
+
         if (!resolvedFilePath && fileData) {
             // Save base64 file to temp location
             const tempDir = path.join(process.cwd(), 'data', 'temp-uploads', profileId);
@@ -2810,14 +3277,14 @@ router.post('/flow/videos/upload-image', async (req: Request, res: Response) => 
             if (!flowClient || !flowClient.hasFlowKey()) {
                 return res.status(503).json({
                     success: false,
-                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                    error: 'Flow client chua c� flowKey. Extension c?a profile n�y chua k?t n?i ho?c chua capture token.',
                 });
             }
             // For server-side fallback, read file and pass base64 directly
             // FlowApiClient.uploadImage expects: (imageBase64, mimeType, projectId, fileName)
             let imageBase64 = fileData;
             let mimeType = 'image/jpeg';
-            
+
             if (!imageBase64 && resolvedFilePath && fs.existsSync(resolvedFilePath)) {
                 const buffer = fs.readFileSync(resolvedFilePath);
                 imageBase64 = buffer.toString('base64');
@@ -2826,7 +3293,7 @@ router.post('/flow/videos/upload-image', async (req: Request, res: Response) => 
                 if (ext.endsWith('.png')) mimeType = 'image/png';
                 else if (ext.endsWith('.webp')) mimeType = 'image/webp';
             }
-            
+
             result = await flowClient.uploadImage(
                 imageBase64!,
                 mimeType,
@@ -2839,12 +3306,12 @@ router.post('/flow/videos/upload-image', async (req: Request, res: Response) => 
         // Python API returns: { media: { name: "uuid" } }
         // Extension/Bridge returns: { result: { status: 200, data: { media: { name: "uuid" } } } }
         const rawData = result?.result?.data || result?.data || result || {};
-        const mediaId = result?.media?.name || 
-                        result?._mediaId || 
-                        result?.data?.media?.name ||
-                        rawData.media?.name ||
-                        null;
-        
+        const mediaId = result?.media?.name ||
+            result?._mediaId ||
+            result?.data?.media?.name ||
+            rawData.media?.name ||
+            null;
+
         // Cleanup temp file if it was created
         if (fileData && resolvedFilePath && fs.existsSync(resolvedFilePath)) {
             try {
@@ -2870,7 +3337,7 @@ router.post('/flow/videos/upload-image', async (req: Request, res: Response) => 
                 mediaId,
                 rawResult: result,
             },
-            message: usedBridge ? 'Upload ảnh thành công qua Extension' : 'Upload ảnh thành công qua Flow API',
+            message: usedBridge ? 'Upload ?nh th�nh c�ng qua Extension' : 'Upload ?nh th�nh c�ng qua Flow API',
         });
     } catch (error: any) {
         logger.error('Error uploading Flow video image:', error);
@@ -2996,7 +3463,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                 }
                 usedBridge = true;
             } catch (bridgeError: any) {
-                logger.warn('Extension bridge generateVideo failed for %s, falling back: %s', profileId, bridgeError.message);
+                logger.warn(`[Video Generate] Bridge failed after retries: ${bridgeError.message}. Falling back to FlowApiClient.`);
             }
         }
 
@@ -3045,25 +3512,25 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
             }
         }
 
-        // Extract workflows/operations từ API response
-        // API v3.1 trả về: { workflows: [{ name: "workflow-id", metadata: { primaryMediaId: "media-id" } }] }
-        // Extension trả về: { status, data: { workflows: [...] } }
+        // Extract workflows/operations t? API response
+        // API v3.1 tr? v?: { workflows: [{ name: "workflow-id", metadata: { primaryMediaId: "media-id" } }] }
+        // Extension tr? v?: { status, data: { workflows: [...] } }
         // Bridge wraps it as: { result: { status, data: { workflows: [...] } } }
         const rawData = result?.result?.data || result?.data || result || {};
         const workflows = rawData.workflows || [];
         const operations = rawData.operations || rawData.data?.operations || workflows;
-        
+
         // Log detailed structure for debugging
         logger.info(`[Video Generate] rawData keys: ${Object.keys(rawData).join(', ')}`);
         logger.info(`[Video Generate] workflows[0]: ${JSON.stringify(workflows[0] || 'empty')}`);
         logger.info(`[Video Generate] operations[0]: ${JSON.stringify(operations[0] || 'empty')}`);
-        
-        // Extract request IDs - có thể là workflow name hoặc operation name
+
+        // Extract request IDs - c� th? l� workflow name ho?c operation name
         const requestIds = (Array.isArray(operations) ? operations : [])
             .map((op: any) => op?.name || op?.id || op?.mediaId || op)
             .filter((id: any) => typeof id === 'string' && id);
 
-        // Extract media IDs từ workflows metadata
+        // Extract media IDs t? workflows metadata
         const mediaIds = (Array.isArray(workflows) ? workflows : [])
             .map((wf: any) => wf?.metadata?.primaryMediaId || wf?.primaryMediaId || wf?.mediaId)
             .filter((id: any) => typeof id === 'string' && id);
@@ -3075,7 +3542,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
         } else {
             logger.info(`[Video Generate] WARNING: No mediaIds extracted! rawData.workflows[0]: ${JSON.stringify(workflows[0] || 'empty').substring(0, 300)}`);
         }
-        
+
         // Check for errors in response
         const responseError = rawData.error || rawData.errorInfo || rawData.status === 'error' ? rawData : null;
         if (responseError) {
@@ -3100,7 +3567,7 @@ router.post('/flow/videos/generate', async (req: Request, res: Response) => {
                 mediaIds,
                 rawResult: result,
             },
-            message: usedBridge ? 'Tạo video thành công qua Extension' : 'Tạo video thành công qua Flow API',
+            message: usedBridge ? 'T?o video th�nh c�ng qua Extension' : 'T?o video th�nh c�ng qua Flow API',
         });
     } catch (error: any) {
         logger.error('Error generating Flow video:', error);
@@ -3184,7 +3651,7 @@ router.post('/flow/videos/upscale', async (req: Request, res: Response) => {
             if (!flowClient || !flowClient.hasFlowKey()) {
                 return res.status(503).json({
                     success: false,
-                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                    error: 'Flow client chua c� flowKey. Extension c?a profile n�y chua k?t n?i ho?c chua capture token.',
                 });
             }
             result = await flowClient.upscaleVideo({
@@ -3436,7 +3903,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
         if (!profileId || typeof profileId !== 'string') {
             return res.status(400).json({ success: false, error: 'profileId is required' });
         }
-        if (!Array.isArray(operations) || !Array.isArray(mediaIds) || 
+        if (!Array.isArray(operations) || !Array.isArray(mediaIds) ||
             operations.length === 0 && mediaIds.length === 0) {
             return res.status(400).json({ success: false, error: 'operations or mediaIds array is required' });
         }
@@ -3465,7 +3932,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
         if (allMediaIds.length > 0 && cachedItems.length === allMediaIds.length) {
             logger.info(`[Video Status] All ${allMediaIds.length} mediaIds already SUCCESSFUL (cached) - skipping batchCheck`);
             // Ensure the result has the correct structure for parsing
-            result = { 
+            result = {
                 media: cachedItems,
                 operations: [], // No operations when using cache
                 data: { media: cachedItems } // Also set data for compatibility
@@ -3493,7 +3960,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
             if (!flowClient || !flowClient.hasFlowKey()) {
                 return res.status(503).json({
                     success: false,
-                    error: 'Flow client chưa có flowKey. Extension của profile này chưa kết nối hoặc chưa capture token.',
+                    error: 'Flow client chua c� flowKey. Extension c?a profile n�y chua k?t n?i ho?c chua capture token.',
                 });
             }
             result = await flowClient.checkVideoStatus(operations);
@@ -3518,19 +3985,19 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
             const mediaMetadata = item?.mediaMetadata;
             const mediaStatus = mediaMetadata?.mediaStatus;
             const statusStr = mediaStatus?.mediaGenerationStatus || item?.status || '';
-            
+
             // Also check video status
             const videoStatus = item?.video?.status;
             const videoError = item?.video?.error || item?.error || mediaMetadata?.error;
 
             // Check if still processing
-            if (statusStr === 'MEDIA_GENERATION_STATUS_ACTIVE' || 
+            if (statusStr === 'MEDIA_GENERATION_STATUS_ACTIVE' ||
                 statusStr === 'MEDIA_GENERATION_STATUS_PENDING' ||
                 videoStatus === 'MEDIA_GENERATION_STATUS_ACTIVE' ||
                 videoStatus === 'MEDIA_GENERATION_STATUS_PENDING') {
                 hasActiveMedia = true;
             }
-            
+
             // Check if FAILED
             const isFailed = statusStr === 'MEDIA_GENERATION_STATUS_FAILED' ||
                 videoStatus === 'MEDIA_GENERATION_STATUS_FAILED' ||
@@ -3540,7 +4007,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                 hasFailedMedia = true;
                 logger.warn(`[Video Status] Media ${item.name} FAILED:`, { statusStr, videoStatus, videoError });
             }
-            
+
             // Check if SUCCESSFUL - video is ready to download
             if (statusStr === 'MEDIA_GENERATION_STATUS_SUCCESSFUL') {
                 hasSuccessfulMedia = true;
@@ -3556,15 +4023,15 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                     });
                 }
             }
-            
+
             // Extract video URL from generatedVideo.fifeUrl
             const generatedVideo = item?.video?.generatedVideo || {};
             const videoObj = item?.video || {};
-            
+
             // Try different URL locations
             const fifeUrl = generatedVideo?.fifeUrl || videoObj?.fifeUrl;
             const servingBaseUri = videoObj?.servingBaseUri;
-            
+
             // If SUCCESSFUL or has URL, mark as completed
             if (statusStr === 'MEDIA_GENERATION_STATUS_SUCCESSFUL' || fifeUrl) {
                 completedVideos.push({
@@ -3578,7 +4045,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                 });
             }
         }
-        
+
         // Also check operations format
         for (const item of rawOps) {
             if (!item) continue;
@@ -3594,7 +4061,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                 });
             }
         }
-        
+
         // isComplete = has successful/ready videos and no active processing
         // Also complete if all media has failed
         const isComplete = ((completedVideos.length > 0 || hasSuccessfulMedia || hasFailedMedia) && !hasActiveMedia) || hasFailedMedia;
@@ -3612,7 +4079,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                     const existingPath = path.join(process.cwd(), 'data', 'videos', `${probeMediaId}.mp4`);
                     if (fs.existsSync(existingPath)) {
                         const stat = fs.statSync(existingPath);
-                        logger.info(`[Video Status] MP4 already saved: ${existingPath} (${(stat.size/1024/1024).toFixed(2)} MB)`);
+                        logger.info(`[Video Status] MP4 already saved: ${existingPath} (${(stat.size / 1024 / 1024).toFixed(2)} MB)`);
                         autoDownloadResult = {
                             mediaId: probeMediaId,
                             success: true,
@@ -3620,39 +4087,39 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                             alreadySaved: true,
                         };
                     } else {
-                    logger.info(`[Video Status] AUTO-PROBE: GET /v1/media/${probeMediaId}`);
-                    const probeResp = await bridge.getMedia(probeMediaId);
-                    const rawData = probeResp?.data || probeResp || {};
-                    const videoObj = rawData.video || {};
-                    
-                    // NOTE: Don't include encodedVideo in autoDownloadResult to avoid PayloadTooLargeError
-                    // The frontend will download via /api/flow/videos/download endpoint
-                    autoDownloadResult = {
-                        mediaId: probeMediaId,
-                        success: !!videoObj.encodedVideo || !!(videoObj.fifeUrl || videoObj.servingBaseUri),
-                        hasEncodedVideo: !!videoObj.encodedVideo,
-                        encodedVideoLength: videoObj.encodedVideo?.length || 0,
-                        hasFifeUrl: !!(videoObj.fifeUrl || videoObj.servingBaseUri),
-                        message: 'Use /api/flow/videos/download to get video data',
-                    };
+                        logger.info(`[Video Status] AUTO-PROBE: GET /v1/media/${probeMediaId}`);
+                        const probeResp = await bridge.getMedia(probeMediaId);
+                        const rawData = probeResp?.data || probeResp || {};
+                        const videoObj = rawData.video || {};
 
-                    // === AUTO-SAVE: If encodedVideo present, save to data/videos/ ===
-                    if (videoObj.encodedVideo) {
-                        try {
-                            const videosDir = path.join(process.cwd(), 'data', 'videos');
-                            if (!fs.existsSync(videosDir)) {
-                                fs.mkdirSync(videosDir, { recursive: true });
+                        // NOTE: Don't include encodedVideo in autoDownloadResult to avoid PayloadTooLargeError
+                        // The frontend will download via /api/flow/videos/download endpoint
+                        autoDownloadResult = {
+                            mediaId: probeMediaId,
+                            success: !!videoObj.encodedVideo || !!(videoObj.fifeUrl || videoObj.servingBaseUri),
+                            hasEncodedVideo: !!videoObj.encodedVideo,
+                            encodedVideoLength: videoObj.encodedVideo?.length || 0,
+                            hasFifeUrl: !!(videoObj.fifeUrl || videoObj.servingBaseUri),
+                            message: 'Use /api/flow/videos/download to get video data',
+                        };
+
+                        // === AUTO-SAVE: If encodedVideo present, save to data/videos/ ===
+                        if (videoObj.encodedVideo) {
+                            try {
+                                const videosDir = path.join(process.cwd(), 'data', 'videos');
+                                if (!fs.existsSync(videosDir)) {
+                                    fs.mkdirSync(videosDir, { recursive: true });
+                                }
+                                const filepath = path.join(videosDir, `${probeMediaId}.mp4`);
+                                const videoBytes = Buffer.from(videoObj.encodedVideo, 'base64');
+                                fs.writeFileSync(filepath, videoBytes);
+                                const sizeMB = (videoBytes.length / 1024 / 1024).toFixed(2);
+                                logger.info(`[Video Status] AUTO-PROBE: Saved MP4 (${sizeMB} MB)`);
+                                if (autoDownloadResult) autoDownloadResult.savedPath = filepath;
+                            } catch (saveErr: any) {
+                                logger.error(`[Video Status] AUTO-PROBE save failed: ${saveErr.message}`);
                             }
-                            const filepath = path.join(videosDir, `${probeMediaId}.mp4`);
-                            const videoBytes = Buffer.from(videoObj.encodedVideo, 'base64');
-                            fs.writeFileSync(filepath, videoBytes);
-                            const sizeMB = (videoBytes.length / 1024 / 1024).toFixed(2);
-                            logger.info(`[Video Status] AUTO-PROBE: Saved MP4 (${sizeMB} MB)`);
-                            if (autoDownloadResult) autoDownloadResult.savedPath = filepath;
-                        } catch (saveErr: any) {
-                            logger.error(`[Video Status] AUTO-PROBE save failed: ${saveErr.message}`);
                         }
-                    }
                     } // close else (no existingPath)
                 }
             } catch (probeErr: any) {
@@ -3687,7 +4154,7 @@ router.post('/flow/videos/status', async (req: Request, res: Response) => {
                 shouldStopPolling: isComplete,
                 stopReason: hasFailedMedia ? 'Video generation FAILED' : (isComplete ? 'Video generation completed' : null),
             },
-            message: usedBridge ? 'Kiểm tra trạng thái qua Extension' : 'Kiểm tra trạng thái qua Flow API',
+            message: usedBridge ? 'Ki?m tra tr?ng th�i qua Extension' : 'Ki?m tra tr?ng th�i qua Flow API',
         });
         logger.info(`[Video Status] RESPONSE: success=true, isComplete=${isComplete}, hasSuccessfulMedia=${hasSuccessfulMedia}, hasFailedMedia=${hasFailedMedia}, completedVideos=${completedVideos.length}, shouldStopPolling=${isComplete}`);
     } catch (error: any) {
@@ -3748,7 +4215,58 @@ function isGeminiOverload(errMsg?: string): boolean {
 }
 
 router.post('/scripts/generate', async (req: Request, res: Response) => {
+    const pickEntityForCharacter = (name: string): any | null => {
+        const q = String(name).trim().toLowerCase();
+        if (!q) return null;
+        const entities = (req.app.locals as any)?.entityRegistry || {};
+        const candidates = Object.values(entities).filter((e: any) => {
+            const ename = String(e?.name || '').toLowerCase();
+            const edesc = String(e?.description || '').toLowerCase();
+            return ename.includes(q) || edesc.includes(q);
+        });
+        return candidates[0] || null;
+    };
+
+    const loadEntityBlocksForCharacters = async (names: string[]): Promise<string[]> => {
+        const blocks: string[] = [];
+        for (const name of names) {
+            const entity = pickEntityForCharacter(name);
+            if (!entity) continue;
+            const parts: string[] = [];
+            if (entity?.reference_image_url || entity?.image_prompt) {
+                parts.push(`Character: ${name.toUpperCase()}`);
+                parts.push(`Reference Image provided.`);
+                if (entity.image_prompt) parts.push(`Appearance: ${entity.image_prompt}`);
+                parts.push(`Rules: Never redesign ${name}. Keep identical face, hairstyle, clothing, colors, and proportions.`);
+            }
+            if (parts.length) blocks.push(parts.join('\n'));
+        }
+        return blocks;
+    };
+
+    const injectEntityRules = (base: string, characters: string[], entityBlocks: string[]): string => {
+        if (!base || !entityBlocks.length) return '';
+        const lines = [
+            'CHARACTER CONSISTENCY RULES',
+            'Use the provided reference appearances EXACTLY.',
+            ...entityBlocks,
+            '',
+            'Rules:',
+            'Never redesign characters.',
+            'Keep identical face.',
+            'Keep identical hairstyle.',
+            'Keep identical clothing.',
+            'Keep identical colors.',
+            'Preserve body proportions.',
+            'Maintain consistency across all scenes.',
+            '',
+            'Scene:',
+        ];
+        return lines.join('\n');
+    };
     const {
+        profileId,
+        projectId,
         input_type,
         youtube_url,
         topic,
@@ -3762,20 +4280,27 @@ router.post('/scripts/generate', async (req: Request, res: Response) => {
         temperature = 0.7,
         no_voice = false,
         no_music = false,
+        material_id,
+        storytelling_mode,
     } = req.body;
 
     // === Load prompt config ===
     const scriptConfig = JSON.parse(fs.readFileSync(path.join(__dirname, 'script_prompts.json'), 'utf-8'));
 
-    // Duration: phút -> giây
+    // Duration: ph�t -> gi�y
     const durationMinutes = Number(req.body.duration_minutes ?? 10);
     const durationSeconds = Math.round(durationMinutes * 60);
+    // Scene count: m?i c?nh ~8s, t?i thi?u 1 c?nh
+    const sceneCount = Math.max(1, Math.ceil(durationSeconds / 8));
 
     const durationLabel = durationSeconds >= 3600
-        ? `${durationSeconds / 3600} giờ (${Math.round(durationSeconds / 60)} phút)`
-        : `${durationMinutes} phút`;
+        ? `${durationSeconds / 3600} gi? (${Math.round(durationSeconds / 60)} ph�t)`
+        : `${durationMinutes} ph�t`;
 
-    const sceneCount = Math.ceil(durationSeconds / 8);
+    const allowedStorytellingModes = new Set(['auto', 'narration', 'dialogue', 'mixed']);
+    const resolvedStorytellingMode = allowedStorytellingModes.has(String(storytelling_mode || '').toLowerCase())
+        ? String(storytelling_mode).toLowerCase()
+        : 'auto';
 
     // === Multi-key rotation ===
     const ALLOWED_GEMINI_MODELS = [
@@ -3836,7 +4361,7 @@ router.post('/scripts/generate', async (req: Request, res: Response) => {
     }
 
     if (!input_type || !['youtube_url', 'topic', 'upload_files'].includes(input_type)) {
-        return res.status(400).json({ success: false, error: 'Thiếu hoặc sai input_type' });
+        return res.status(400).json({ success: false, error: 'Thi?u ho?c sai input_type' });
     }
 
     const langMap: Record<string, string> = {
@@ -3848,42 +4373,45 @@ router.post('/scripts/generate', async (req: Request, res: Response) => {
 
     // Optional modifiers
     const voiceNote = no_voice
-        ? '\nQUAN TRỌNG: KHÔNG CÓ THOẠI. Tất cả các cảnh phải HOÀN TOÀN IM LẶNG. Không viết bất kỳ dialogue, narration, hay lời thoại nào. tts_script phải là chuỗi rỗng "".'
+        ? '\nQUAN TR?NG: KHONG CO THO?I. T?t c? c�c c?nh ph?i HOAN TOAN IM L?NG. Kh�ng vi?t b?t k? dialogue, narration, hay l?i tho?i n�o. tts_script ph?i l� chu?i r?ng "".'
         : '';
     const musicNote = no_music
-        ? '\nÂM THANH: Không có nhạc nền. Chỉ giữ âm thanh tự nhiên từ cảnh quay (tiếng bước chân, tiếng nước, tiếng gió...) phù hợp với hành động trên màn hình.'
+        ? '\nAM THANH: Kh�ng c� nh?c n?n. Ch? gi? �m thanh t? nhi�n t? c?nh quay (ti?ng bu?c ch�n, ti?ng nu?c, ti?ng gi�...) ph� h?p v?i h�nh d?ng tr�n m�n h�nh.'
         : '';
 
-    // Build system instruction từ JSON config
+    // Build system instruction t? JSON config
     const systemInstruction = scriptConfig.system_instruction
         .replace('{DURATION_LABEL}', durationLabel)
         .replace('{SCENE_COUNT}', String(sceneCount))
         .replace('{TARGET_LANG}', targetLang)
+        .replace('{STORYTELLING_MODE}', resolvedStorytellingMode)
         + voiceNote
         + musicNote;
 
-    // Build user prompt từ JSON config
+    // Build user prompt t? JSON config
     const tpl = scriptConfig.prompts[input_type] || scriptConfig.prompts.topic;
     let userPrompt = tpl
         .replace('{TARGET_LANG}', targetLang)
         .replace('{COPY_RATIO}', String(copy_ratio))
         .replace('{CREATIVE_RATIO}', String(100 - Number(copy_ratio)))
         .replace('{DURATION_LABEL}', durationLabel)
-        .replace('{ADDITIONAL_DESC}', additional_description ? `Mô tả thêm: ${additional_description}\n` : '')
-        .replace('{NO_VOICE_FLAG}', no_voice ? 'KHÔNG CÓ THOẠI. Tất cả các cảnh hoàn toàn im lặng.' : '')
-        .replace('{NO_MUSIC_FLAG}', no_music ? 'Không có nhạc nền. Chỉ giữ âm thanh tự nhiên từ cảnh quay.' : '')
+        .replace('{SCENE_COUNT}', String(sceneCount))
+        .replace('{STORYTELLING_MODE}', resolvedStorytellingMode)
+        .replace('{ADDITIONAL_DESC}', additional_description ? `M� t? th�m: ${additional_description}\n` : '')
+        .replace('{NO_VOICE_FLAG}', no_voice ? 'KHONG CO THO?I. T?t c? c�c c?nh ho�n to�n im l?ng.' : '')
+        .replace('{NO_MUSIC_FLAG}', no_music ? 'Kh�ng c� nh?c n?n. Ch? gi? �m thanh t? nhi�n t? c?nh quay.' : '')
         .replace('{TOPIC}', topic || '');
 
     try {
         const genaiModule = await importGenai();
         if (!genaiModule) {
-            return res.status(500).json({ success: false, error: 'Chưa cài đặt @google/genai. Chạy: npm install @google/genai' });
+            return res.status(500).json({ success: false, error: 'Chua c�i d?t @google/genai. Ch?y: npm install @google/genai' });
         }
         const { GoogleGenAI, HarmCategory, HarmBlockThreshold, Type } = genaiModule;
 
         const allKeys = getGeminiApiKeys();
         if (allKeys.length === 0) {
-            return res.status(500).json({ success: false, error: 'GEMINI_API_KEY chưa được cài đặt. Vui lòng nhập API key ở panel bên trái hoặc set GEMINI_API_KEY trong .env' });
+            return res.status(500).json({ success: false, error: 'GEMINI_API_KEY chua du?c c�i d?t. Vui l�ng nh?p API key ? panel b�n tr�i ho?c set GEMINI_API_KEY trong .env' });
         }
 
         // Safety settings - block nothing
@@ -3917,8 +4445,8 @@ router.post('/scripts/generate', async (req: Request, res: Response) => {
         const userModel = getGeminiModel().replace('models/', '');
         const modelQueue: string[] = [userModel, ...MODEL_ORDER.filter(m => m !== userModel)];
 
-        // Nested retry: model first → then key
-        let lastError = 'Chưa thử';
+        // Nested retry: model first  then key
+        let lastError = 'Chua th?';
         outerLoop:
         for (const modelName of modelQueue) {
             const modelId = modelName.startsWith('models/') ? modelName : `models/${modelName}`;
@@ -3937,47 +4465,115 @@ router.post('/scripts/generate', async (req: Request, res: Response) => {
                         },
                     });
                     const rawText = resp.text;
-                    if (!rawText?.trim()) { lastError = 'Gemini trả về response rỗng'; break; }
+                    if (!rawText?.trim()) { lastError = 'Gemini tr? v? response r?ng'; break; }
                     logger.info(`[Script Generate] Raw response (${rawText.length} chars): ${rawText.slice(0, 500)}`);
                     const data = parseLLMJsonOutput(rawText.trim());
-                    if (!data) { lastError = `Gemini không trả JSON đúng format. Raw: ${rawText.slice(0, 200)}`; break; }
-                    if (!data.scenes?.length) { lastError = `Gemini trả JSON thiếu scenes. Keys: ${Object.keys(data).join(', ')}`; break; }
+                    if (!data) { lastError = `Gemini kh�ng tr? JSON d�ng format. Raw: ${rawText.slice(0, 200)}`; break; }
+                    if (!data.scenes?.length) { lastError = `Gemini tr? JSON thi?u scenes. Keys: ${Object.keys(data).join(', ')}`; break; }
 
+                    const characterNames = Array.isArray(data.characters)
+                        ? data.characters.map((c: any) => String(c.name || '').trim()).filter(Boolean)
+                        : [];
+                    const entityBlocks = await loadEntityBlocksForCharacters(characterNames);
+                    const resolvedStyle = resolveMaterialStyle(material_id, req);
                     const result = {
                         title: data.title || topic || 'Untitled Script',
                         topic: data.topic || topic || '',
                         total_scenes: data.total_scenes || data.scenes.length,
-                        scenes: data.scenes.map((s: any, i: number) => ({
-                            scene_id: s.scene_id ?? (i + 1),
-                            scene_title: s.scene_title || `Cảnh ${i + 1}`,
-                            description: s.description || '',
-                            visual_prompt: s.visual_prompt || s.image_prompt || '',
-                            tts_script: s.tts_script || '',
-                            transition: s.transition,
-                        })),
+                        storytelling_mode: resolvedStorytellingMode,
+                        characters: Array.isArray(data.characters) ? data.characters : [],
+                        scenes: data.scenes.map((s: any, i: number) => {
+                            const sceneCharacters = Array.isArray(s.characters)
+                                ? s.characters.map((name: string) => String(name).trim()).filter(Boolean)
+                                : [];
+                            const baseVisual = (s.visual_prompt || '').trim();
+                            const injectedVisual = injectEntityRules(baseVisual, sceneCharacters, entityBlocks);
+                            let visual_prompt = injectedVisual || baseVisual;
+                            if (resolvedStyle) {
+                                const styleInstruction = resolvedStyle.instruction.trim();
+                                const stylePrefix = resolvedStyle.prefix.trim();
+                                const negativePrompt = resolvedStyle.negative_prompt.trim();
+                                if (stylePrefix && !visual_prompt.toLowerCase().startsWith(stylePrefix.toLowerCase())) {
+                                    visual_prompt = visual_prompt
+                                        ? `${stylePrefix}${stylePrefix.endsWith('.') ? ' ' : ', '}${visual_prompt}`
+                                        : stylePrefix;
+                                } else if (!visual_prompt && stylePrefix) {
+                                    visual_prompt = stylePrefix;
+                                }
+                                if (styleInstruction) {
+                                    visual_prompt = `${visual_prompt}${visual_prompt ? ' ' : ''}${styleInstruction}`;
+                                }
+                                if (negativePrompt) {
+                                    visual_prompt = `${visual_prompt}${visual_prompt ? ' ' : ''}${negativePrompt}`;
+                                }
+                            }
+                            return {
+                                scene_id: s.scene_id ?? (i + 1),
+                                scene_title: s.scene_title || `C?nh ${i + 1}`,
+                                characters: sceneCharacters,
+                                visual_prompt: visual_prompt || 'Cinematic scene, high production value.',
+                                material_id: material_id || undefined,
+                                tts_script: s.tts_script || '',
+                                transition: s.transition,
+                                duration_seconds: 8,
+                            };
+                        }),
                     };
+
+                    // Save script to database
+                    try {
+                        const db = req.app.locals.db as DatabaseManager;
+                        const scriptId = `script_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+                        const scriptName = data.title || topic || 'Untitled Script';
+                        const projectIdToUse = projectId || null;
+                        const nextVersion = projectIdToUse ? db.getNextScriptVersion(projectIdToUse, profileId) : 1;
+
+                        db.createScriptReference({
+                            id: scriptId,
+                            projectId: projectIdToUse,
+                            profileId,
+                            name: scriptName,
+                            version: nextVersion,
+                            input_type: input_type || null,
+                            topic: topic || null,
+                            storytelling_mode: resolvedStorytellingMode,
+                            duration_text: duration_text || '60',
+                            copy_ratio: Number(copy_ratio) || 90,
+                            material_id: material_id || null,
+                            content: JSON.stringify(result),
+                            metadata: '{}',
+                        });
+
+                        (result as any).script_id = scriptId;
+                        (result as any).script_version = nextVersion;
+                        logger.info(`[Script Generate] Saved script "${scriptName}" v${nextVersion} (id: ${scriptId})`);
+                    } catch (saveErr) {
+                        logger.error('[Script Generate] Failed to save script:', saveErr);
+                    }
+
                     return res.json({ success: true, data: result });
                 } catch (callErr: any) {
                     lastError = callErr.message || String(callErr);
                     if (!isGeminiOverload(lastError)) {
                         break outerLoop;
                     }
-                    // Overload → thử model tiếp theo, KHÔNG retry cùng model/key
-                    logger.info(`[Script Generate] Overload: model=${modelName} key=${apiKey.slice(0, 12)} → skip to next model`);
+                    // Overload  th? model ti?p theo, KHONG retry c�ng model/key
+                    logger.info(`[Script Generate] Overload: model=${modelName} key=${apiKey.slice(0, 12)}  skip to next model`);
                     break;
                 }
             }
         }
 
         if (isGeminiOverload(lastError)) {
-            return res.status(503).json({ success: false, error: 'Gemini đang quá tải, vui lòng thử lại sau vài phút.' });
+            return res.status(503).json({ success: false, error: 'Gemini dang qu� t?i, vui l�ng th? l?i sau v�i ph�t.' });
         }
         return res.status(500).json({ success: false, error: lastError });
     } catch (err: any) {
         logger.error('[Script Generate] Error:', err);
-        res.status(500).json({ success: false, error: err.message || 'Lỗi khi sinh kịch bản' });
+        res.status(500).json({ success: false, error: err.message || 'L?i khi sinh k?ch b?n' });
     }
 });
 
 export default router;
+
 

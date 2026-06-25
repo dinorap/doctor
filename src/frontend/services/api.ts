@@ -16,27 +16,50 @@ import type {
   UploadImageResult,
   VideoStatusData,
   UpscaleVideoRequest,
+  VideoPipeline,
+  PipelineStatusResponse,
+  SceneTask,
+  VideoProjectSettings,
+  CreatePipelineRequest,
+  RetryPipelineRequest,
+  ClaimSceneRequest,
 } from '../types';
 
 const API_BASE = '';
 
 class ApiService {
   private async request<T>(url: string, options?: RequestInit): Promise<T> {
-    const response = await fetch(`${API_BASE}${url}`, {
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
-      ...options,
-    });
+    try {
+      const response = await fetch(`${API_BASE}${url}`, {
+        headers: {
+          'Content-Type': 'application/json',
+          ...options?.headers,
+        },
+        ...options,
+      });
 
-    const result: ApiResponse<T> = await response.json();
+      // Check if response is ok before parsing JSON
+      let result: ApiResponse<T>;
+      try {
+        result = await response.json();
+      } catch (jsonError) {
+        // Response is not valid JSON
+        const text = await response.text().catch(() => 'Unable to read response');
+        throw new Error(`Invalid JSON response (${response.status}): ${text.slice(0, 200)}`);
+      }
 
-    if (!response.ok || !result.success) {
-      throw new Error(result.error || 'Request failed');
+      if (!response.ok || !result.success) {
+        throw new Error(result.error || `Request failed with status ${response.status}`);
+      }
+
+      return result.data as T;
+    } catch (error) {
+      // Network error or other issues
+      if (error instanceof TypeError && error.message.includes('fetch')) {
+        throw new Error('Network error: Unable to connect to server');
+      }
+      throw error;
     }
-
-    return result.data as T;
   }
 
   // Profiles
@@ -195,11 +218,11 @@ class ApiService {
     });
   }
 
-  async checkVideoStatus(data: { 
-    profileId: string; 
+  async checkVideoStatus(data: {
+    profileId: string;
     projectId?: string;
-    operations?: string[]; 
-    mediaIds?: string[]; 
+    operations?: string[];
+    mediaIds?: string[];
   }): Promise<VideoStatusData> {
     return this.request<VideoStatusData>('/api/flow/videos/status', {
       method: 'POST',
@@ -214,6 +237,8 @@ class ApiService {
 
   // Script Generation
   async generateScript(data: {
+    profileId?: string;
+    projectId?: string;
     input_type: 'youtube_url' | 'topic' | 'upload_files';
     youtube_url?: string;
     topic?: string;
@@ -227,23 +252,34 @@ class ApiService {
     temperature?: number;
     no_voice?: boolean;
     no_music?: boolean;
+    material_id?: string;
+    storytelling_mode?: 'auto' | 'narration' | 'dialogue' | 'mixed';
   }): Promise<{
     title: string;
     topic: string;
     duration_seconds: number;
     total_scenes: number;
+    storytelling_mode?: string;
     summary?: string;
     style_notes?: string;
+    characters?: {
+      name: string;
+      role?: string;
+      description?: string;
+    }[];
     scenes: {
       scene_id: number;
       scene_title: string;
-      description: string;
-      image_prompt: string;
+      characters?: string[];
+      visual_prompt: string;
       tts_script: string;
       duration_seconds: number;
       suggested_visual?: string;
       transition?: string;
+      material_id?: string;
     }[];
+    script_id?: string;
+    script_version?: number;
   }> {
     return this.request('/api/scripts/generate', {
       method: 'POST',
@@ -255,11 +291,217 @@ class ApiService {
     return this.request('/api/gemini-settings');
   }
 
+  // Scripts
+  async getScripts(profileId?: string, projectId?: string): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (profileId) params.append('profileId', profileId);
+    if (projectId) params.append('projectId', projectId);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return this.request<any[]>('/api/scripts' + qs);
+  }
+
+  async getScript(id: string): Promise<any> {
+    return this.request<any>(`/api/scripts/${id}`);
+  }
+
+  async deleteScript(id: string): Promise<void> {
+    return this.request('/api/scripts/' + id, { method: 'DELETE' });
+  }
+
+  async saveScript(data: {
+    projectId: string;
+    profileId?: string;
+    content: string;
+    metadata?: Record<string, any>;
+  }): Promise<any> {
+    return this.request('/api/scripts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  // Update script with character descriptions injected into scene prompts
+  async updateScriptWithCharacters(data: {
+    scriptId: string;
+    characters: Array<{
+      name: string;
+      description: string;
+      imagePrompt?: string;
+      entityId?: string;
+    }>;
+  }): Promise<any> {
+    return this.request('/api/scripts/update-characters', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateScriptScene(data: {
+    scriptId: string;
+    scenes: Array<{
+      scene_id: number;
+      scene_title?: string;
+      description?: string;
+      tts_script?: string;
+      visual_prompt?: string;
+      image_prompt?: string;
+      duration_seconds?: number;
+      transition?: string;
+      suggested_visual?: string;
+      characters?: string[];
+    }>;
+  }): Promise<{ id: string; updatedSceneIds: number[]; content: any }> {
+    return this.request('/api/scripts/update-scenes', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   async saveGeminiSettings(data: { apiKeys: string; model: string }): Promise<{ apiKeys: string; model: string; updatedAt: string }> {
     return this.request('/api/gemini-settings', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+  }
+
+  // Pipelines
+  async getPipelines(): Promise<VideoPipeline[]> {
+    return this.request<VideoPipeline[]>('/api/pipelines');
+  }
+
+  async getPipeline(id: string): Promise<VideoPipeline> {
+    return this.request<VideoPipeline>(`/api/pipelines/${id}`);
+  }
+
+  async createPipeline(data: CreatePipelineRequest): Promise<VideoPipeline> {
+    return this.request<VideoPipeline>('/api/pipelines', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async startPipeline(id: string, profileCredits?: Array<{ profileId: string; credits: number }>): Promise<void> {
+    await this.request(`/api/pipelines/${id}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ profileCredits }),
+    });
+  }
+
+  async retryCaptchaErrors(id: string): Promise<{ retriedCount: number }> {
+    return this.request<{ retriedCount: number }>(`/api/pipelines/${id}/retry-captcha`, { method: 'POST' });
+  }
+
+  async getPipelineProgress(id: string): Promise<{ completed: number; failed: number; total: number; processing: number }> {
+    return this.request<{ completed: number; failed: number; total: number; processing: number }>(`/api/pipelines/${id}/progress`);
+  }
+
+  async pausePipeline(id: string): Promise<void> {
+    await this.request(`/api/pipelines/${id}/pause`, { method: 'POST' });
+  }
+
+  async stopPipeline(id: string): Promise<void> {
+    await this.request(`/api/pipelines/${id}/stop`, { method: 'POST' });
+  }
+
+  async retryPipeline(id: string, taskIds?: string[]): Promise<{ retriedCount: number }> {
+    return this.request<{ retriedCount: number }>(`/api/pipelines/${id}/retry`, {
+      method: 'POST',
+      body: JSON.stringify({ taskIds }),
+    });
+  }
+
+  async deletePipeline(id: string): Promise<void> {
+    await this.request(`/api/pipelines/${id}`, { method: 'DELETE' });
+  }
+
+  async getPipelineStatus(id: string): Promise<PipelineStatusResponse> {
+    return this.request<PipelineStatusResponse>(`/api/pipelines/${id}/status`);
+  }
+
+  async getPipelineScenes(id: string): Promise<SceneTask[]> {
+    return this.request<SceneTask[]>(`/api/pipelines/${id}/scenes`);
+  }
+
+  async claimScene(pipelineId: string, sceneIndex: number, profileId: string): Promise<SceneTask> {
+    return this.request<SceneTask>(`/api/pipelines/${pipelineId}/scene/${sceneIndex}/claim`, {
+      method: 'POST',
+      body: JSON.stringify({ profileId }),
+    });
+  }
+
+  async updateScene(pipelineId: string, sceneIndex: number, data: Partial<SceneTask>): Promise<void> {
+    await this.request(`/api/pipelines/${pipelineId}/scene/${sceneIndex}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getProjectVideoSettings(projectId: string): Promise<VideoProjectSettings | null> {
+    const result = await this.request<{ data: VideoProjectSettings | null }>(`/api/pipelines/settings/project/${projectId}`);
+    return result.data || null;
+  }
+
+  async saveProjectVideoSettings(data: {
+    projectId: string;
+    selectedProfileIds: string[];
+    defaultModel?: string;
+    defaultDuration?: string;
+    defaultAspectRatio?: string;
+  }): Promise<VideoProjectSettings> {
+    return this.request<VideoProjectSettings>(`/api/pipelines/settings/project/${data.projectId}`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async uploadReferenceImages(pipelineId: string): Promise<{
+    totalImages: number;
+    totalProfiles: number;
+    successfulUploads: string[];
+    failedImages: string[];
+    mediaMapPath: string;
+  }> {
+    return this.request(`/api/pipelines/${pipelineId}/upload-refs`, { method: 'POST' });
+  }
+
+  async finalAssemblePipeline(pipelineId: string, data?: {
+    mode?: 'concat' | 'xfade';
+    transition?: string;
+    transitionDurationSeconds?: number;
+    originalAudioVolumePercent?: number;
+    musicPath?: string;
+    musicVolume?: number;
+    logoPath?: string;
+    logoWidth?: number;
+    logoHeight?: number;
+    logoPosition?: string;
+    logoXPercent?: number;
+    logoYPercent?: number;
+    logoZoomPercent?: number;
+    textOverlay?: string;
+    textBgOpacityPercent?: number;
+  }): Promise<{
+    pipelineId: string;
+    finalVideoPath: string;
+    finalVideoFileName: string;
+    completedScenes: number;
+    failedScenes: number;
+    totalScenes: number;
+  }> {
+    return this.request(`/api/pipelines/${pipelineId}/final-assemble`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    });
+  }
+
+  async getFinalOutput(pipelineId: string): Promise<{
+    pipelineId: string;
+    status: string;
+    finalVideoPath: string | null;
+    localFinalVideoPath: string | null;
+    finalize: any;
+  }> {
+    return this.request(`/api/pipelines/${pipelineId}/final-output`);
   }
 }
 

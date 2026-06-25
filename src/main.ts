@@ -3,10 +3,13 @@ import cors from 'cors';
 import path from 'path';
 import http from 'http';
 import routes from './api/routes';
+import { initPipelineRoutes } from './api/pipelineRoutes';
+import { initFinalizeRoutes } from './api/finalizeRoutes';
 import logger from './utils/logger';
 import CONFIG from './config';
 import { BrowserManager } from './browser-manager/BrowserManager';
 import { DatabaseManager } from './database/Database';
+import { PipelineManager } from './pipeline/PipelineManager';
 import { ExtensionBridgeRegistry } from './flow-api/ExtensionBridgeRegistry';
 import { FlowApiRegistry } from './flow-api/FlowApiRegistry';
 
@@ -15,6 +18,7 @@ const server = http.createServer(app);
 
 // Initialize database
 const db = new DatabaseManager(CONFIG.paths.database);
+const pipelineManager = new PipelineManager(db);
 
 // Initialize browser manager with database
 const browserManager = new BrowserManager(db);
@@ -339,6 +343,12 @@ app.use('/data/entity-references', express.static(path.join(__dirname, '../data/
 
 // API routes
 app.use('/api', routes);
+app.use('/api/pipelines', require('./api/pipelineRoutes').default);
+app.use('/api/pipelines', require('./api/finalizeRoutes').default);
+
+// Initialize pipeline routes with database and flow registry
+initPipelineRoutes(db, flowRegistry);
+initFinalizeRoutes(db, pipelineManager);
 
 // Error handling middleware
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
@@ -393,7 +403,13 @@ server.listen(PORT, () => {
 ║    POST /api/flow/projects/create                         ║
 ║    POST /api/flow/projects/create-batch                   ║
 ║    POST /api/flow/images/generate                         ║
-    ║    POST /api/ext/callback                                ║
+║    POST /api/ext/callback                                ║
+║    GET  /api/pipelines                                    ║
+║    POST /api/pipelines                                    ║
+║    GET  /api/pipelines/:id/status                         ║
+║    POST /api/pipelines/:id/start                         ║
+║    POST /api/pipelines/:id/pause                         ║
+║    POST /api/pipelines/:id/stop                           ║
 ║  Events (WebSocket):                                      ║
 ║    browser-closed, profiles-updated                        ║
 ║    extension-status, tier-updated, media-urls-refresh      ║

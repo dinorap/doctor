@@ -23,6 +23,7 @@ export interface Profile extends ProfileConfig {
     hasSavedSession?: boolean;
     lastSaved?: string;
     flowProjects?: FlowProject[];
+    status?: 'running' | 'idle' | 'off';
 }
 
 export interface CreateProfileRequest {
@@ -76,6 +77,7 @@ export interface CreateFlowProjectsBatchRequest {
 export interface FlowProject {
     id: string;
     profileId: string;
+    profileName?: string; // Extended field from metadata
     name: string;
     description?: string;
     toolName?: string;
@@ -291,3 +293,131 @@ export interface LibraryEntity {
     reference_image_url?: string;
     media_id?: string;
 }
+
+// Pipeline types
+export type PipelineStatus = 'pending' | 'processing' | 'paused' | 'completed' | 'failed';
+
+export interface SceneTask {
+    id: string;
+    pipelineId: string;
+    sceneIndex: number;
+    sceneData: any;
+    status: 'pending' | 'assigned' | 'generating' | 'completed' | 'failed';
+    assignedProfileId: string;
+    imageUrl: string;
+    videoUrl: string;
+    characterRefs: Record<string, string>;
+    progress: number;
+    error: string;
+    startedAt?: string;
+    completedAt?: string;
+}
+
+export interface PipelineStatusResponse {
+    pipelineId: string;
+    status: PipelineStatus;
+    totalScenes: number;
+    completedScenes: number;
+    failedScenes: number;
+    progress: number;
+    scenes: Array<{
+        sceneIndex: number;
+        status: string;
+        imageUrl?: string;
+        videoUrl?: string;
+        error?: string;
+        assignedProfileId?: string;
+    }>;
+}
+
+export interface CreatePipelineRequest {
+    name: string;
+    projectId?: string;
+    scriptId: string;
+    selectedProfileIds: string[];
+    outputFolder: string;
+    scenes: Array<{
+        sceneIndex: number;
+        name?: string;
+        description?: string;
+        imagePrompt?: string;
+        entityId?: string;
+    }>;
+}
+
+export interface RetryPipelineRequest {
+    taskIds?: string[];
+}
+
+export interface ClaimSceneRequest {
+    profileId: string;
+}
+
+export interface VideoPipeline {
+    id: string;
+    name: string;
+    projectId?: string;
+    scriptId: string;
+    profileIds: string;
+    status: PipelineStatus;
+    config: Record<string, any>;
+    totalScenes: number;
+    completedScenes: number;
+    failedScenes: number;
+    outputFolder: string;
+    errorMessage?: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface VideoProjectSettings {
+    id: string;
+    projectId: string;
+    selectedProfileIds: string;
+    defaultModel?: string;
+    defaultDuration?: string;
+    defaultAspectRatio?: string;
+    createdAt: string;
+    updatedAt: string;
+}
+
+// Video Project types for Scene Grid UI
+export interface SceneAsset {
+    id: string;
+    type: 'image' | 'video';
+    url: string;
+    name: string;
+}
+
+export interface SceneData {
+    sceneIndex: number;
+    prompt: string;
+    negativePrompt?: string;
+    duration?: string;
+    characters?: string[];
+    assets: SceneAsset[];
+    status: 'pending' | 'generating' | 'completed' | 'failed';
+    progress?: number;
+    videoUrl?: string;
+    imageUrl?: string;
+    error?: string;
+    assignedProfileId?: string;
+}
+
+export interface VideoProject {
+    id: string;
+    name: string;
+    scriptId: string;
+    profileIds: string[];
+    scenes: SceneData[];
+    globalReferences: SceneAsset[];
+    createdAt: string;
+    updatedAt: string;
+}
+
+export interface CharacterRef {
+    id: string;
+    name: string;
+    images: SceneAsset[];
+}
+

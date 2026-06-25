@@ -6,6 +6,9 @@ import type { Profile, FlowProject, GeneratedImageResult } from '../types';
 import { api } from '../services/api';
 import FlowVideosTab from './FlowVideosTab';
 import ScriptGeneratorTab from './ScriptGeneratorTab';
+import PipelineTab from './PipelineTab';
+import PipelineDetailPage from './PipelineDetailPage';
+import VideoProjectTab from './VideoProjectTab';
 import '../styles/App.css';
 
 // Helper to extract filename from path (browser-compatible)
@@ -84,7 +87,6 @@ function Sidebar({ activeTab, onTabChange, totalProfiles, activeSessions, cloakS
         { id: 'profiles', icon: '👤', label: 'Profile Manager' },
         { id: 'flow-projects', icon: '🌊', label: 'Flow Projects' },
         { id: 'entities', icon: '🎭', label: 'Entity Library' },
-        { id: 'script-gen', icon: '✍️', label: 'Sinh Kịch Bản' },
         { id: 'settings', icon: '⚙️', label: 'Settings' },
     ];
 
@@ -597,6 +599,7 @@ interface EntityReference {
 
 interface MaterialStyle {
     id: string;
+    value?: string; // alias for id - some code uses this
     label: string;
     color: string;
     style_instruction: string;
@@ -1832,7 +1835,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
             projectId: project.projectId,
         });
         return acc;
-    }, {} as Record<string, { name: string; description?: string; profiles: { profileId: string; profileName: string; projectId?: string }[] }>);
+    }, {} as Record<string, { name: string; description?: string; profiles: { profileId: string; profileName?: string; projectId?: string }[] }>);
 
     const groupedProjectsList = Object.values(groupedProjects);
 
@@ -1908,7 +1911,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
         if (onOpenProfile) {
             // Open profile with Flow and navigate to specific project URL
             const projectUrl = `https://labs.google/fx/vi/tools/flow/project/${projectId}`;
-            await onOpenProfile(profileId, true, false, projectUrl);
+            await onOpenProfile(profileId, true);
         }
     };
 
@@ -1949,8 +1952,8 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
                     </div>
                 ) : (
                     <div className="flow-projects-grid">
-                        {groupedProjectsList.map((group) => (
-                            <div key={`${group.name}-${group.projectId}`} className="flow-project-card" style={{ cursor: 'pointer' }}>
+                        {groupedProjectsList.map((group, idx) => (
+                            <div key={`${group.name}-${idx}`} className="flow-project-card" style={{ cursor: 'pointer' }}>
                                 <div className="flow-project-card-header" onClick={() => onOpenProjectDetail(group.name)}>
                                     <div className="flow-project-icon">🌊</div>
                                     <div className="flow-project-info">
@@ -2008,7 +2011,7 @@ function FlowProjectsTab({ profiles, onCreateProjectsBatch, onUpdateProfileMetad
                                                 group.profiles.forEach(p => {
                                                     const profile = profiles.find(pr => pr.id === p.profileId);
                                                     if (profile) {
-                                                        const metadata = { ...profile.metadata } || {};
+                                                        const metadata = { ...profile.metadata };
                                                         metadata.flowProjects = (metadata.flowProjects || []).filter(
                                                             (proj: any) => proj.name !== group.name
                                                         );
@@ -2575,10 +2578,10 @@ function LibraryPlaceholderPage({ title, description }: { title: string; descrip
     );
 }
 
-// Project Detail Page - contains Videos/Images tabs
+// Project Detail Page - contains Videos/Images/Scripts tabs
 interface ProjectDetailPageProps {
     projectName: string;
-    projectTab: 'videos' | 'images';
+    projectTab: 'videos' | 'images' | 'scripts';
     profiles: Profile[];
     onUpdateProfileMetadata: (profileId: string, metadata: Record<string, any>) => Promise<any>;
     onOpenProfile?: (profileId: string, openFlow?: boolean) => Promise<void>;
@@ -2613,7 +2616,7 @@ function ProjectDetailPage({
     resetGeneratedImage,
     onBack,
 }: ProjectDetailPageProps) {
-    const [activeProjectTab, setActiveProjectTab] = useState<'videos' | 'images'>(projectTab);
+    const [activeProjectTab, setActiveProjectTab] = useState<'videos' | 'images' | 'scripts'>(projectTab);
 
     // Get profiles that have this specific project
     const projectProfiles = profiles.filter((profile) => {
@@ -2647,7 +2650,7 @@ function ProjectDetailPage({
     const handleDeleteProject = () => {
         if (!confirm(`Xóa dự án "${projectName}" khỏi tất cả profiles?`)) return;
         projectProfilesWithMeta.forEach(({ profile }) => {
-            const metadata = { ...profile.metadata } || {};
+            const metadata = { ...profile.metadata };
             metadata.flowProjects = (metadata.flowProjects || []).filter(
                 (proj: any) => proj.name !== projectName
             );
@@ -2707,6 +2710,12 @@ function ProjectDetailPage({
                 >
                     🖼️ Images
                 </button>
+                <button
+                    className={`content-tab ${activeProjectTab === 'scripts' ? 'active' : ''}`}
+                    onClick={() => setActiveProjectTab('scripts')}
+                >
+                    📝 Scripts
+                </button>
             </div>
 
             <div className="content-body">
@@ -2717,7 +2726,7 @@ function ProjectDetailPage({
                         onOpenProfile={onOpenProfile}
                         onWaitForProfileReady={onWaitForProfileReady}
                     />
-                ) : (
+                ) : activeProjectTab === 'images' ? (
                     <ProjectImagesTab
                         profiles={projectProfiles}
                         projectName={projectName}
@@ -2726,6 +2735,13 @@ function ProjectDetailPage({
                         error={imageError}
                         onGenerateImage={generateImage}
                         onClearResult={resetGeneratedImage}
+                        onOpenProfile={onOpenProfile}
+                        onWaitForProfileReady={onWaitForProfileReady}
+                    />
+                ) : (
+                    <ProjectScriptsTab
+                        profiles={projectProfiles}
+                        projectName={projectName}
                         onOpenProfile={onOpenProfile}
                         onWaitForProfileReady={onWaitForProfileReady}
                     />
@@ -3026,11 +3042,49 @@ function ProjectImagesTab({
     );
 }
 
+// Project Scripts Tab - renders ScriptGeneratorTab content but scoped to this project's profiles
+function ProjectScriptsTab({
+    profiles,
+    projectName,
+    onOpenProfile,
+    onWaitForProfileReady,
+}: {
+    profiles: Profile[];
+    projectName: string;
+    onOpenProfile?: (profileId: string, openFlow?: boolean) => Promise<void>;
+    onWaitForProfileReady?: (profileId: string, timeoutMs?: number) => Promise<void>;
+}) {
+    const getProjectIdx = (profile: Profile) => {
+        const flowProjects: any[] = (profile.metadata as any)?.flowProjects || [];
+        return flowProjects.findIndex((proj: any) => proj.name === projectName);
+    };
+
+    if (profiles.length === 0) {
+        return (
+            <div className="empty-state">
+                <div className="empty-icon">📝</div>
+                <h3>Chưa có Profile nào trong dự án</h3>
+                <p>Hãy thêm profile vào dự án "{projectName}" trước.</p>
+            </div>
+        );
+    }
+
+    return (
+        <ScriptGeneratorTab
+            profiles={profiles}
+            projectName={projectName}
+            onOpenProfile={onOpenProfile}
+            onWaitForProfileReady={onWaitForProfileReady}
+        />
+    );
+}
+
 export default function App() {
     const [activeTab, setActiveTab] = useState('profiles');
     const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
     const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
     const [activeProject, setActiveProject] = useState<string | null>(null);
+    const [pipelineDetailId, setPipelineDetail] = useState<string | null>(null);
 
     const { profiles, loading, creating: creatingProfile, loadProfiles, createProfile, updateProfile, deleteProfile, openProfile, closeProfile, saveSession, refreshTier, setProxy, createFlowProjectsBatch, waitForProfileReady } = useProfiles();
     const { status: cloakStatus } = useCloakBrowser();
@@ -3228,9 +3282,9 @@ export default function App() {
         setActiveTab('flow-projects');
     };
 
-    // Get the project-specific tab (Videos/Images) within a project
+    // Get the project-specific tab (Videos/Images/Scripts) within a project
     const activeProjectTab = isProjectTab(activeTab)
-        ? (activeTab.split(':').pop() as 'videos' | 'images' || 'videos')
+        ? (activeTab.split(':').pop() as 'videos' | 'images' | 'scripts' || 'videos')
         : 'videos';
 
     return (
@@ -3272,6 +3326,8 @@ export default function App() {
                     />
                 </div>
 
+
+
                 {/* Project Detail - with Videos/Images tabs */}
                 {isProjectTab(activeTab) && activeProject && (
                     <ProjectDetailPage
@@ -3293,11 +3349,6 @@ export default function App() {
                 {/* Entity Library */}
                 <div className={`tab-content ${activeTab === 'entities' ? 'active' : ''}`}>
                     <EntitiesTab profiles={profiles} onOpenProfile={openProfile} onWaitForProfileReady={waitForProfileReady} onOpenLightbox={(src, alt) => setLightbox({ src, alt })} />
-                </div>
-
-                {/* Script Generator */}
-                <div className={`tab-content ${activeTab === 'script-gen' ? 'active' : ''}`}>
-                    <ScriptGeneratorTab />
                 </div>
 
                 {/* Settings */}
